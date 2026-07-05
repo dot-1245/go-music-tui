@@ -81,12 +81,12 @@ func loadTheme() Theme {
 
 type PlayerInfo struct {
 	Name, Title, Artist, Album, ArtUrl string
-	Status, Shuffle, Loop              string
-	Volume, Position, Length           int
+	Status, Shuffle, Loop               string
+	Volume, Position, Length            int
 }
 
 type LyricLine struct {
-	Time int
+	Time float64
 	Text string
 }
 
@@ -158,16 +158,19 @@ func fetchLyricsAsync(title, artist, album string, myReqID int) {
 			}
 		}
 
-		lyricMutex.Lock()
-		if myReqID != currentReqID {
-			lyricMutex.Unlock()
+		checkReqValid := func() bool {
+			lyricMutex.Lock()
+			defer lyricMutex.Unlock()
+			return myReqID == currentReqID
+		}
+
+		if !checkReqValid() {
 			return
 		}
-		lyricMutex.Unlock()
 
 		if !found {
 			lyricMutex.Lock()
-			if myReqID == currentReqID {
+			if currentReqID == myReqID {
 				currentLyrics = []LyricLine{{Time: 0, Text: "No lyrics found :("}}
 			}
 			lyricMutex.Unlock()
@@ -176,7 +179,7 @@ func fetchLyricsAsync(title, artist, album string, myReqID int) {
 
 		if officialArtist, ok := results[0]["artistName"].(string); ok && officialArtist != "" {
 			lyricMutex.Lock()
-			if myReqID == currentReqID {
+			if currentReqID == myReqID {
 				currentDisplayArtist = officialArtist
 			}
 			lyricMutex.Unlock()
@@ -185,7 +188,7 @@ func fetchLyricsAsync(title, artist, album string, myReqID int) {
 		synced, ok := results[0]["syncedLyrics"].(string)
 		if !ok || synced == "" {
 			lyricMutex.Lock()
-			if myReqID == currentReqID {
+			if currentReqID == myReqID {
 				currentLyrics = []LyricLine{{Time: 0, Text: "No synced lyrics available"}}
 			}
 			lyricMutex.Unlock()
@@ -199,14 +202,23 @@ func fetchLyricsAsync(title, artist, album string, myReqID int) {
 			if len(matches) >= 5 {
 				min, _ := strconv.Atoi(matches[1])
 				sec, _ := strconv.Atoi(matches[2])
+				msStr := matches[3]
 				text := strings.TrimSpace(matches[4])
-				totalSec := min*60 + sec
+
+				if len(msStr) == 2 {
+					msStr += "0"
+				} else if len(msStr) > 3 {
+					msStr = msStr[:3]
+				}
+				ms, _ := strconv.Atoi(msStr)
+
+				totalSec := float64(min*60+sec) + (float64(ms) / 1000.0)
 				parsed = append(parsed, LyricLine{Time: totalSec, Text: text})
 			}
 		}
 
 		lyricMutex.Lock()
-		if myReqID == currentReqID {
+		if currentReqID == myReqID {
 			currentLyrics = parsed
 		}
 		lyricMutex.Unlock()
@@ -300,18 +312,23 @@ func main() {
 		default:
 		}
 
-		posF, _ := strconv.ParseFloat(cmdOut("-p", p, "position"), 64)
-		lenI, _ := strconv.Atoi(cmdOut("-p", p, "metadata", "mpris:length"))
-		volF, _ := strconv.ParseFloat(cmdOut("-p", p, "volume"), 64)
+		metaOut := cmdOut("-p", p, "metadata", "--format", "{{position}};;{{mpris:length}};;{{volume}};;{{status}};;{{xesam:title}};;{{xesam:artist}};;{{xesam:album}};;{{mpris:artUrl}};;{{shuffle}};;{{loop}}")
+		parts := strings.Split(metaOut, ";;")
+
+		if len(parts) < 10 {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
+		posF, _ := strconv.ParseFloat(parts[0], 64)
+		posSec := posF / 1000000.0
+		lenI, _ := strconv.Atoi(parts[1])
+		volF, _ := strconv.ParseFloat(parts[2], 64)
 
 		info := PlayerInfo{
-			Name: p, Status: cmdOut("-p", p, "status"),
-			Title:   cmdOut("-p", p, "metadata", "xesam:title"),
-			Artist:  cmdOut("-p", p, "metadata", "xesam:artist"),
-			Album:   cmdOut("-p", p, "metadata", "xesam:album"),
-			ArtUrl:  cmdOut("-p", p, "metadata", "mpris:artUrl"),
-			Shuffle: cmdOut("-p", p, "shuffle"), Loop: cmdOut("-p", p, "loop"),
-			Volume: int(volF * 100), Position: int(posF), Length: lenI / 1000000,
+			Name: p, Position: int(posSec), Length: lenI / 1000000, Volume: int(volF * 100),
+			Status: parts[3], Title: parts[4], Artist: parts[5], Album: parts[6],
+			ArtUrl: parts[7], Shuffle: parts[8], Loop: parts[9],
 		}
 
 		if info.Title != prevTitle || info.Artist != prevArtist {
@@ -410,7 +427,7 @@ func main() {
 		nextIdx := -1
 
 		for i, line := range currentLyrics {
-			if info.Position >= line.Time {
+			if posSec >= line.Time {
 				currentIdx = i
 			} else {
 				nextIdx = i
