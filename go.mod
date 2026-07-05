@@ -1,4 +1,4 @@
-module hello-go
+module github.com/dot-1245/go-music-tui
 
 go 1.26.1
 
