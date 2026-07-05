@@ -17,6 +17,7 @@ a beautiful tui music viewer with playerctl write in Go
 - **Terminal supported icat(kitty recomended)**
 - matugen(advanced)
 - **any MPRIS supported Player(Recommend mpv+mpv-mpris or spotify, Firefox and Firefox-Fork sucks at providing artwork)**
+- **any Nerd Fonts**
 
 ### Step 1: clone this repo 
 
