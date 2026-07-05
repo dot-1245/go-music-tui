@@ -1,0 +1,135 @@
+name: 🐛 Bug Report
+description: File a bug report to help us improve go-music-tui.
+title: "[BUG]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug! Please fill out the form below.
+        バグ報告ありがとうございます！以下のフォームへのご記入をお願いいたします。
+
+  - type: dropdown
+    id: language
+    attributes:
+      label: 🌐 Preferred Language / 希望する対応言語
+      description: Which language would you prefer to communicate in? (どちらの言語での対応を希望しますか？)
+      options:
+        - English (英語)
+        - Japanese (日本語)
+        - Either is fine (どちらでも可)
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 📝 Description of the Bug / バグの概要
+      description: A clear and concise description of what the bug is. (発生した問題を簡潔に説明してください。)
+      placeholder: Describe the problem you encountered...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 🔄 Steps to Reproduce / 再現手順
+      description: Steps to reproduce the behavior. (問題が再現する手順を教えてください。)
+      placeholder: |
+        1. Run `go-music-tui`
+        2. Do '...'
+        3. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: 🎯 Expected Behavior / 期待する動作
+      description: A clear and concise description of what you expected to happen. (本来どのような動作になることを期待していましたか？)
+      placeholder: I have no idea to write in this place holder :)
+    validations:
+      required: true
+
+  - type: input
+    id: distro
+    attributes:
+      label: 💻 Linux Distribution & Version / 使用ディストロとバージョン
+      placeholder: "e.g., Arch Linux, Ubuntu 24.04, Fedora 40"
+    validations:
+      required: true
+
+  - type: input
+    id: media-player
+    attributes:
+      label: 🎵 Media Player / 使用しているメディアプレーヤー
+      placeholder: "e.g., Spotify, VLC, mpv"
+    validations:
+      required: true
+
+  - type: input
+    id: terminal
+    attributes:
+      label: 🐚 Terminal Emulator / 使用しているターミナル
+      placeholder: "e.g., alacritty, kitty, iTerm2, tmux"
+    validations:
+      required: true
+
+  - type: input
+    id: go-version
+    attributes:
+      label: 🐹 Go Version / 使用しているGoのバージョン
+      placeholder: "e.g., go version go1.26.4-X:nodwarf5 linux/amd64"
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: 📦 Software Version / このソフト(go-music-tui)のバージョン
+      placeholder: "e.g., vn.n.n commit:s0meth1ng"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: download-source
+    attributes:
+      label: 📥 Where did you download it from? / どこからダウンロードしましたか？
+      options:
+        - GitHub Releases (Binary)
+        - Go Install
+        - Build Myself With Go Build
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: troubleshooting
+    attributes:
+      label: 🛠️ Troubleshooting Checklist / トラブルシューティングの確認
+      description: Please check the following before submitting. (送信前に以下を確認してください。)
+      options:
+        - label: I have updated my OS/system. (システム(OS)を最新go version go1.26.4-X:nodwarf5 linux/amd64に更新してみた)
+          required: true
+        - label: I have updated go-music-tui to the latest version. (このソフトを最新に更新してみた)
+          required: true
+
+  - type: textarea
+    id: playerctl-metadata
+    attributes:
+      label: 📊 Result of `playerctl metadata -a` /  `playerctl metadata -a` の結果
+      description: Please run `playerctl metadata -a` in your terminal and paste the output here./ `playerctl metadata -a` の実行結果を貼り付けてください。
+      placeholder: Copy and paste the command output...
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 📋 Error Logs or Screenshots / エラーログやスクリーンショット
+      description: If you have any error logs or stack traces, please paste them here.
+      placeholder: Attach screenshots by dragging and dropping them into this box.
+    validations:
+      required: false
