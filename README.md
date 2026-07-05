@@ -11,7 +11,8 @@ a beautiful tui music viewer with playerctl written in Go
 - [x] Live Lyrics from lrclib
 - [x] kitty album art
 - [ ] Customizable KeyConfig
-- [ ] Fully Matugen Support
+- [ ] TTY Color support
+- [ ] No Lyrics mode
 - [ ] AUR Support(at this timing, AUR Registration is temporarily closed by Spam :/)
 ## how to use?
 
