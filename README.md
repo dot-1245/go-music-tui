@@ -12,16 +12,22 @@ a beautiful tui music viewer with playerctl written in Go
 - [x] kitty album art
 - [ ] Customizable KeyConfig
 - [ ] Fully Matugen Support
+- [ ] AUR Support(at this timing, AUR Registration is temporarily closed by Spam :/)
 ## how to use?
 
 ### Before running the project, make sure you have the following requirements installed:
-- **playerctl**
+- **playerctl** (Mac is not supported)
 - **Go(1.26+ Recommended)**
 - **Terminal supported kittyimg(kitty recommended)**
 - matugen(advanced)
 - **any MPRIS supported Player(Recommend mpv+mpv-mpris or spotify, Firefox and Firefox-Fork sucks at providing artwork)**
 - **any Nerd Fonts**
 
+## Auto Install With Go(Recommended)
+```bash
+go install github.com/dot-1245/go-music-tui@latest
+```
+## Manual Install
 ### Step 1: clone this repo 
 
 using https
