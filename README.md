@@ -1,5 +1,5 @@
-<img width="48%" alt="image1" src="https://github.com/user-attachments/assets/ba36ec87-262a-4cac-ac31-7645c713c654" />
-<img width="48%" alt="image2" src="https://github.com/user-attachments/assets/96af5af5-91d4-479b-b801-82e31f34a418" />
+<img width="48%" alt="image1" src=".github/images/screenshot1.png" />
+<img width="48%" alt="image2" src=".github/images/screenshot2.png" />
 
 # go-music-tui
 a beautiful tui music viewer with playerctl written in Go
