@@ -16,17 +16,17 @@ a beautiful tui music viewer with playerctl written in Go
 - [ ] click-able UI
 - [ ] Support CJK characters 
 - [ ] AUR Support(at this timing, AUR Registration is temporarily closed by Spam :/)
-## how to use?
+## Install / How to setup?
 
 ### Before running the project, make sure you have the following requirements installed:
 - **playerctl** (Mac is not supported)
 - **Go(1.26+ Recommended)**
-- **Terminal supported kittyimg(kitty recommended)**
+- **Terminal supported kittyimg (kitty recommended)**
 - matugen(advanced)
-- **any MPRIS supported Player(Recommend mpv+mpv-mpris or spotify, Firefox and Firefox-Fork sucks at providing artwork)**
+- **any MPRIS supported Player (Recommend mpv+mpv-mpris or spotify, Firefox and Firefox-Fork suck at providing artwork)**
 - **any Nerd Fonts**
 
-## Auto Install With Go(Recommended)
+## Auto Install With Go (Recommended)
 ```bash
 go install github.com/dot-1245/go-music-tui@latest
 ```
@@ -43,7 +43,7 @@ using ssh
 git clone git@github.com:dot-1245/go-music-tui.git
 ```
 
-**using github CLI(recommended)**
+**using github CLI (recommended)**
 ```bash
 gh repo clone dot-1245/go-music-tui
 ```
@@ -72,7 +72,7 @@ source_color #4285f4
 on_error_container #ffdad6
 outline #919191
 ```
-so you can use matugen or any software to change color to anything you want(wallpaper, artwork, anything!)
+so you can use matugen or any software to change color to anything you want (wallpaper, artwork, anything!)
 
 > [!WARNING]
 > it's based on my system, it may cause bugs / mess up your nice Rice due to incorrect paths. Be Careful With ALL Step! Please Read and Verify All commands Before Run!
@@ -102,5 +102,5 @@ EOF
 
 Done! Enjoy!
 
-# LICENSE:
+## LICENSE:
 [GPL v3.0](LICENSE)
