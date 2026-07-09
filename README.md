@@ -16,7 +16,7 @@ a beautiful tui music viewer with playerctl written in Go
 - [ ] click-able UI
 - [ ] Support CJK characters 
 - [ ] AUR Support(at this timing, AUR Registration is temporarily closed by Spam :/)
-## how to use?
+## Install / How to setup?
 
 ### Before running the project, make sure you have the following requirements installed:
 - **playerctl** (Mac is not supported)
@@ -102,5 +102,5 @@ EOF
 
 Done! Enjoy!
 
-# LICENSE:
+## LICENSE:
 [GPL v3.0](LICENSE)
