@@ -8,6 +8,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,7 +34,10 @@ func hexToANSI(hex string) string {
 		return ""
 	}
 	var r, g, b uint8
-	fmt.Sscanf(hex, "#%02x%02x%02x", &r, &g, &b)
+	n, err := fmt.Sscanf(hex, "#%02x%02x%02x", &r, &g, &b)
+	if err != nil || n != 3 {
+		return ""
+	}
 	return fmt.Sprintf("\033[38;2;%d;%d;%dm", r, g, b)
 }
 
@@ -81,8 +85,8 @@ func loadTheme() Theme {
 
 type PlayerInfo struct {
 	Name, Title, Artist, Album, ArtUrl string
-	Status, Shuffle, Loop               string
-	Volume, Position, Length            int
+	Status, Shuffle, Loop              string
+	Volume, Position, Length           int
 }
 
 type LyricLine struct {
@@ -128,33 +132,297 @@ func fetchImage(url string) (image.Image, error) {
 	return img, err
 }
 
-func parseLyricsResponse(resp *http.Response, myReqID int) ([]map[string]interface{}, bool) {
-	var results []map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil || len(results) == 0 {
-		return nil, false
-	}
-	return results, true
+// featRe は "(feat. XXX)" "[ft. XXX]" "(with XXX)" のようなコラボ注釈を検出する。
+// Spotify等はコラボ曲のタイトルにこれを自動付与するが、lrclibの登録タイトルは
+// 付いていないことが多く、そのまま検索するとヒットしなくなるため除去する。
+var featRe = regexp.MustCompile(`(?i)[\(\[](feat\.?|ft\.?|with)\s+[^\)\]]*[\)\]]`)
+
+// cleanTrackTitle は検索用にタイトルからコラボ注釈を取り除く。
+func cleanTrackTitle(title string) string {
+	cleaned := featRe.ReplaceAllString(title, "")
+	return strings.TrimSpace(cleaned)
 }
 
-func fetchLyricsAsync(title, artist, album string, myReqID int) {
-	go func() {
-		client := http.Client{Timeout: 15 * time.Second}
-		var results []map[string]interface{}
-		found := false
+// instRe は "(Instrumental)" "(Inst.)" "(off vocal)" "(カラオケ)" のような
+// インスト版を示す注釈を検出する。この手の曲は元々歌詞が存在しないため、
+// タイトルだけが似ている無関係な曲を誤って引っ張ってくる原因になりやすい。
+var instRe = regexp.MustCompile(`(?i)[\(\[【](inst(?:rumental)?\.?|off\s*vocal|karaoke|カラオケ|インスト(?:ゥルメンタル)?)[\)\]】]`)
 
-		apiURL1 := fmt.Sprintf("https://lrclib.net/api/search?track_name=%s&artist_name=%s", url.QueryEscape(title), url.QueryEscape(artist))
-		resp1, err := client.Get(apiURL1)
-		if err == nil {
-			results, found = parseLyricsResponse(resp1, myReqID)
-			resp1.Body.Close()
+// isInstrumentalTitle はタイトルにインスト版を示す注釈が含まれているかを判定する。
+func isInstrumentalTitle(title string) bool {
+	return instRe.MatchString(title)
+}
+
+// searchLyrics は lrclib の検索APIを叩いて結果を返す。失敗時は空スライス。
+func searchLyrics(client *http.Client, params url.Values) []map[string]interface{} {
+	resp, err := client.Get("https://lrclib.net/api/search?" + params.Encode())
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var results []map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+		return nil
+	}
+	return results
+}
+
+// levenshtein は2つの文字列間の編集距離をrune単位で計算する。
+func levenshtein(a, b []rune) int {
+	la, lb := len(a), len(b)
+	if la == 0 {
+		return lb
+	}
+	if lb == 0 {
+		return la
+	}
+	prev := make([]int, lb+1)
+	curr := make([]int, lb+1)
+	for j := 0; j <= lb; j++ {
+		prev[j] = j
+	}
+	for i := 1; i <= la; i++ {
+		curr[0] = i
+		for j := 1; j <= lb; j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			del := prev[j] + 1
+			ins := curr[j-1] + 1
+			sub := prev[j-1] + cost
+			m := del
+			if ins < m {
+				m = ins
+			}
+			if sub < m {
+				m = sub
+			}
+			curr[j] = m
+		}
+		prev, curr = curr, prev
+	}
+	return prev[lb]
+}
+
+// titleSimilarity は2つの曲名を大文字小文字・前後空白を無視して比較し、
+// 0.0(まったく違う)〜1.0(完全一致)の類似度を返す。
+func titleSimilarity(a, b string) float64 {
+	ra := []rune(strings.ToLower(strings.TrimSpace(a)))
+	rb := []rune(strings.ToLower(strings.TrimSpace(b)))
+	maxLen := len(ra)
+	if len(rb) > maxLen {
+		maxLen = len(rb)
+	}
+	if maxLen == 0 {
+		return 1
+	}
+	dist := levenshtein(ra, rb)
+	return 1 - float64(dist)/float64(maxLen)
+}
+
+// minTitleSimilarity を下回る候補は「たまたま再生時間が近いだけの無関係な曲」
+// とみなして除外する。低すぎるとインスト曲などで誤検出したまま拾ってしまい、
+// 高すぎると表記ゆれ吸収の効果が薄れるので、様子を見て調整してよい値。
+const minTitleSimilarity = 0.4
+
+// pickBestMatch は同期歌詞を持ち、かつ検索対象の曲名とある程度似ている候補の中から、
+// 目標の再生時間に一番近いものを選ぶ。
+// アーティスト表記ゆれ等でヒットした複数候補から正しい曲を選別しつつ、
+// 曲名が全然違う無関係な曲（インスト版の検索で拾いがちな別曲など）は弾く。
+func pickBestMatch(results []map[string]interface{}, targetDuration int, targetTitle string) map[string]interface{} {
+	var best map[string]interface{}
+	bestDiff := math.MaxFloat64
+	for _, r := range results {
+		synced, ok := r["syncedLyrics"].(string)
+		if !ok || synced == "" {
+			continue
 		}
 
-		if !found && album != "" {
-			apiURL2 := fmt.Sprintf("https://lrclib.net/api/search?track_name=%s&album_name=%s", url.QueryEscape(title), url.QueryEscape(album))
-			resp2, err := client.Get(apiURL2)
-			if err == nil {
-				results, found = parseLyricsResponse(resp2, myReqID)
-				resp2.Body.Close()
+		trackName, _ := r["trackName"].(string)
+		if trackName != "" && titleSimilarity(trackName, targetTitle) < minTitleSimilarity {
+			continue
+		}
+
+		dur, _ := r["duration"].(float64)
+		diff := math.Abs(dur - float64(targetDuration))
+		if diff < bestDiff {
+			bestDiff = diff
+			best = r
+		}
+	}
+	return best
+}
+
+// --- MusicBrainz連携 ---
+//
+// lrclibのテキスト検索だけだと、Spotifyの日本語ローカライズ表記(例:
+// "Radiohead"が現地語表記に化ける等)や、アーティストの別名義(例:
+// かめりあ / Camellia / Cametek)を吸収できない。
+// MusicBrainzは「同一人物の別名義」をエイリアスとして正式に持っているので、
+// 一度MusicBrainzで曲を正規化し、そのアーティストの別名義を全部取得してから
+// それぞれの名義でlrclibを検索することで、表記ゆれをかなり吸収できる。
+//
+// 注意: MusicBrainz APIは「意味のあるUser-Agent(アプリ名/バージョン/連絡先)」を
+// 要求しており、汎用的すぎる/未設定のUAはブロック・格下げされる。
+// mbUserAgentは自分のリポジトリURLや連絡先に書き換えて使うこと。
+const mbUserAgent = "playerctl-lyrics-tui/1.0 ( https://github.com/yourname/yourrepo )"
+
+type mbAlias struct {
+	Name string `json:"name"`
+}
+
+type mbArtistDetail struct {
+	Name    string    `json:"name"`
+	Aliases []mbAlias `json:"aliases"`
+}
+
+type mbArtistCredit struct {
+	Artist struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"artist"`
+}
+
+type mbRecording struct {
+	Title        string           `json:"title"`
+	ArtistCredit []mbArtistCredit `json:"artist-credit"`
+}
+
+type mbSearchResp struct {
+	Recordings []mbRecording `json:"recordings"`
+}
+
+// mbQueryEscape は MusicBrainz の検索クエリ(Lucene構文)で
+// 特別な意味を持つ最低限の文字をエスケープする。
+func mbQueryEscape(s string) string {
+	r := strings.NewReplacer(
+		`\`, `\\`,
+		`"`, `\"`,
+	)
+	return r.Replace(s)
+}
+
+func mbGet(client *http.Client, path string) ([]byte, error) {
+	req, err := http.NewRequest("GET", "https://musicbrainz.org/ws/2/"+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", mbUserAgent)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+
+// mbResolve は MusicBrainz でタイトル+アーティストから録音を検索し、
+// 正規化されたタイトルと、そのアーティストの別名義(エイリアス)を集めて返す。
+// 例: title="ノーウェアエレベータ", artist="かめりあ"
+//
+//	-> canonicalTitle="Nowhere Elevator" (登録されていれば), artistNames=["かめりあ","Camellia","Cametek",...]
+//
+// 見つからない場合は ok=false。
+func mbResolve(client *http.Client, title, artist string) (canonicalTitle string, artistNames []string, ok bool) {
+	q := fmt.Sprintf(`recording:"%s" AND artist:"%s"`, mbQueryEscape(title), mbQueryEscape(artist))
+	body, err := mbGet(client, "recording?query="+url.QueryEscape(q)+"&fmt=json&limit=5")
+	if err != nil {
+		return "", nil, false
+	}
+	var result mbSearchResp
+	if err := json.Unmarshal(body, &result); err != nil || len(result.Recordings) == 0 {
+		return "", nil, false
+	}
+
+	rec := result.Recordings[0]
+	if rec.Title == "" || len(rec.ArtistCredit) == 0 {
+		return "", nil, false
+	}
+
+	primary := rec.ArtistCredit[0].Artist
+	artistNames = append(artistNames, primary.Name)
+
+	if primary.ID != "" {
+		// MusicBrainzは未認証だと1req/秒程度のゆるいレート制限があるため、
+		// 連続で叩く前に一呼吸置く(行儀よく使うため)。
+		time.Sleep(1100 * time.Millisecond)
+
+		if aliasBody, err := mbGet(client, "artist/"+primary.ID+"?inc=aliases&fmt=json"); err == nil {
+			var detail mbArtistDetail
+			if json.Unmarshal(aliasBody, &detail) == nil {
+				seen := map[string]bool{primary.Name: true}
+				for _, al := range detail.Aliases {
+					if al.Name == "" || seen[al.Name] {
+						continue
+					}
+					seen[al.Name] = true
+					artistNames = append(artistNames, al.Name)
+					if len(artistNames) >= 6 { // 際限なく増やさないための上限
+						break
+					}
+				}
+			}
+		}
+	}
+
+	return rec.Title, artistNames, true
+}
+
+func fetchLyricsAsync(title, artist, album string, durationSec int, myReqID int) {
+	go func() {
+		// インスト版は元々歌詞が存在しないので、無駄なHTTPリクエストを飛ばす前に、
+		// かつ「似たタイトルの無関係な曲」を誤って引っ張ってくる前にここで弾く。
+		if isInstrumentalTitle(title) {
+			lyricMutex.Lock()
+			if currentReqID == myReqID {
+				currentLyrics = []LyricLine{{Time: 0, Text: "Instrumental track (no lyrics)"}}
+			}
+			lyricMutex.Unlock()
+			return
+		}
+
+		client := http.Client{Timeout: 15 * time.Second}
+
+		var allResults []map[string]interface{}
+
+		// "(feat. XXX)" のようなコラボ注釈を除いたタイトル。
+		// lrclib側は注釈なしで登録されていることが多く、
+		// 付いたままだと検索がヒットしなくなるため、こちらを優先的に使う。
+		cleanTitle := cleanTrackTitle(title)
+
+		// 1段目: クリーンタイトル + アーティスト名
+		allResults = append(allResults, searchLyrics(&client, url.Values{
+			"track_name": {cleanTitle}, "artist_name": {artist},
+		})...)
+
+		// 2段目: クリーンタイトル + アルバム名（アーティスト表記が違う場合の保険）
+		if album != "" {
+			allResults = append(allResults, searchLyrics(&client, url.Values{
+				"track_name": {cleanTitle}, "album_name": {album},
+			})...)
+		}
+
+		// 3段目: クリーンタイトルのみ（アーティスト名がローマ字/現地語などで一致しない場合の保険）
+		allResults = append(allResults, searchLyrics(&client, url.Values{
+			"track_name": {cleanTitle},
+		})...)
+
+		// 4段目: 元のタイトルそのまま（逆に feat. 込みで登録されているレアケースの保険）
+		if cleanTitle != title {
+			allResults = append(allResults, searchLyrics(&client, url.Values{
+				"track_name": {title},
+			})...)
+		}
+
+		// 5段目: MusicBrainzで正規化したタイトル・アーティストの別名義で検索。
+		// "かめりあ"表記のトラックを"Camellia"名義でlrclibに登録している、
+		// といった表記ゆれをここで吸収する。
+		if mbTitle, mbArtists, ok := mbResolve(&client, cleanTitle, artist); ok {
+			for _, a := range mbArtists {
+				allResults = append(allResults, searchLyrics(&client, url.Values{
+					"track_name": {mbTitle}, "artist_name": {a},
+				})...)
 			}
 		}
 
@@ -168,7 +436,7 @@ func fetchLyricsAsync(title, artist, album string, myReqID int) {
 			return
 		}
 
-		if !found {
+		if len(allResults) == 0 {
 			lyricMutex.Lock()
 			if currentReqID == myReqID {
 				currentLyrics = []LyricLine{{Time: 0, Text: "No lyrics found :("}}
@@ -177,16 +445,9 @@ func fetchLyricsAsync(title, artist, album string, myReqID int) {
 			return
 		}
 
-		if officialArtist, ok := results[0]["artistName"].(string); ok && officialArtist != "" {
-			lyricMutex.Lock()
-			if currentReqID == myReqID {
-				currentDisplayArtist = officialArtist
-			}
-			lyricMutex.Unlock()
-		}
-
-		synced, ok := results[0]["syncedLyrics"].(string)
-		if !ok || synced == "" {
+		// 表記ゆれで違う曲がヒットしていても、再生時間が最も近いものを選ぶ
+		best := pickBestMatch(allResults, durationSec, cleanTitle)
+		if best == nil {
 			lyricMutex.Lock()
 			if currentReqID == myReqID {
 				currentLyrics = []LyricLine{{Time: 0, Text: "No synced lyrics available"}}
@@ -194,6 +455,16 @@ func fetchLyricsAsync(title, artist, album string, myReqID int) {
 			lyricMutex.Unlock()
 			return
 		}
+
+		if officialArtist, ok := best["artistName"].(string); ok && officialArtist != "" {
+			lyricMutex.Lock()
+			if currentReqID == myReqID {
+				currentDisplayArtist = officialArtist
+			}
+			lyricMutex.Unlock()
+		}
+
+		synced, _ := best["syncedLyrics"].(string)
 
 		var parsed []LyricLine
 		lines := strings.Split(synced, "\n")
@@ -248,7 +519,9 @@ func main() {
 	var prevArtist string
 	var lastArtUrl string
 
-	inputChan := make(chan byte)
+	// バッファを持たせることで、キー入力の読み取りgoroutineがメインループの
+	// 処理待ちでブロックしにくくする（長押し時の入力詰まり対策の一部）。
+	inputChan := make(chan byte, 64)
 	go func() {
 		buf := make([]byte, 1)
 		for {
@@ -275,41 +548,49 @@ func main() {
 		}
 		p := strings.Fields(pList)[0]
 
-		select {
-		case key := <-inputChan:
-			switch key {
-			case ' ':
-				cmdRun("-p", p, "play-pause")
-			case 'q':
-				cmdRun("-p", p, "previous")
-			case 'w':
-				cmdRun("-p", p, "volume", "0.05+")
-			case 'e':
-				cmdRun("-p", p, "next")
-			case 'a':
-				cmdRun("-p", p, "position", "5-")
-			case 's':
-				cmdRun("-p", p, "volume", "0.05-")
-			case 'd':
-				cmdRun("-p", p, "position", "5+")
-			case 'z':
-				cmdRun("-p", p, "shuffle", "Toggle")
-			case 'x':
-				currentLoop := cmdOut("-p", p, "loop")
-				switch currentLoop {
-				case "None", "":
-					cmdRun("-p", p, "loop", "Track")
-				case "Track":
-					cmdRun("-p", p, "loop", "Playlist")
-				case "Playlist":
-					cmdRun("-p", p, "loop", "None")
-				default:
-					cmdRun("-p", p, "loop", "None")
+		// キー長押し対策: 1ループにつき1個だけ処理するのではなく、
+		// その時点で溜まっている入力を全部処理してから次に進む。
+		// こうしないとオートリピートで溜まったキューの後ろにESCが並んでしまい、
+		// 長押しをやめるまで数秒〜操作不能になる。
+	drainInput:
+		for {
+			select {
+			case key := <-inputChan:
+				switch key {
+				case ' ':
+					cmdRun("-p", p, "play-pause")
+				case 'q':
+					cmdRun("-p", p, "previous")
+				case 'w':
+					cmdRun("-p", p, "volume", "0.05+")
+				case 'e':
+					cmdRun("-p", p, "next")
+				case 'a':
+					cmdRun("-p", p, "position", "5-")
+				case 's':
+					cmdRun("-p", p, "volume", "0.05-")
+				case 'd':
+					cmdRun("-p", p, "position", "5+")
+				case 'z':
+					cmdRun("-p", p, "shuffle", "Toggle")
+				case 'x':
+					currentLoop := cmdOut("-p", p, "loop")
+					switch currentLoop {
+					case "None", "":
+						cmdRun("-p", p, "loop", "Track")
+					case "Track":
+						cmdRun("-p", p, "loop", "Playlist")
+					case "Playlist":
+						cmdRun("-p", p, "loop", "None")
+					default:
+						cmdRun("-p", p, "loop", "None")
+					}
+				case 27, 3:
+					return
 				}
-			case 27, 3:
-				return
+			default:
+				break drainInput
 			}
-		default:
 		}
 
 		metaOut := cmdOut("-p", p, "metadata", "--format", "{{position}};;{{mpris:length}};;{{volume}};;{{status}};;{{xesam:title}};;{{xesam:artist}};;{{xesam:album}};;{{mpris:artUrl}};;{{shuffle}};;{{loop}}")
@@ -343,7 +624,7 @@ func main() {
 
 			playerNameLower := strings.ToLower(info.Name)
 			if strings.Contains(playerNameLower, "spotify") || strings.Contains(playerNameLower, "mpv") {
-				fetchLyricsAsync(info.Title, info.Artist, info.Album, activeID)
+				fetchLyricsAsync(info.Title, info.Artist, info.Album, info.Length, activeID)
 			} else {
 				lyricMutex.Lock()
 				currentLyrics = []LyricLine{{Time: 0, Text: "Lyrics not supported for this player"}}
@@ -367,7 +648,11 @@ func main() {
 					kittyimg.Fprintln(os.Stdout, resized)
 					lastArtUrl = info.ArtUrl
 				} else {
-					lastArtUrl = ""
+					// 取得失敗時もこのURLは処理済み扱いにする。
+					// ここを "" のままにすると次のループでも同じURLが
+					// 「未取得」と判定され続け、毎フレーム同じ画像を
+					// 再リクエストし続けてしまう。
+					lastArtUrl = info.ArtUrl
 				}
 			} else {
 				lastArtUrl = ""
@@ -386,8 +671,14 @@ func main() {
 		}
 		draw := func(y int, color, icon, label, text string) {
 			limit := cols - offsetX - 10
-			if limit > 0 && len(text) > limit {
-				text = text[:limit]
+			if limit > 0 {
+				// rune単位で切る。バイト単位(len(text))で切ると
+				// 日本語や絵文字混じりの文字列でUTF-8境界を壊し、
+				// 文字化けを起こすことがあるため。
+				runes := []rune(text)
+				if len(runes) > limit {
+					text = string(runes[:limit])
+				}
 			}
 			fmt.Printf("\033[%d;%dH%s%s %s%-8s: %s%s\033[K", y, offsetX, color, icon, theme.Gray, label, theme.Reset, text)
 		}
@@ -403,19 +694,29 @@ func main() {
 
 		volW := 12
 		volP := info.Volume * volW / 100
-		if volP > volW { volP = volW }
-		if volP < 0 { volP = 0 }
+		if volP > volW {
+			volP = volW
+		}
+		if volP < 0 {
+			volP = 0
+		}
 		volBar := theme.Accent + strings.Repeat("=", volP) + theme.Gray + strings.Repeat("-", volW-volP) + theme.Reset
 		draw(12, theme.Accent, "󰕾", "Volume", fmt.Sprintf("[%s] %d%%", volBar, info.Volume))
 
 		barW := cols - offsetX - 18
-		if barW < 10 { barW = 10 }
+		if barW < 10 {
+			barW = 10
+		}
 		prog := 0
 		if info.Length > 0 {
 			prog = info.Position * barW / info.Length
 		}
-		if prog > barW { prog = barW }
-		if prog < 0 { prog = 0 }
+		if prog > barW {
+			prog = barW
+		}
+		if prog < 0 {
+			prog = 0
+		}
 
 		barStr := theme.Accent + strings.Repeat("=", prog) + theme.Gray + strings.Repeat("-", barW-prog) + theme.Reset
 		timeStr := fmt.Sprintf("%02d:%02d / %02d:%02d", info.Position/60, info.Position%60, info.Length/60, info.Length%60)
