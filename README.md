@@ -15,7 +15,7 @@ a beautiful tui music viewer with playerctl written in Go
 - [ ] No Lyrics mode
 - [ ] No Album-art mode
 - [ ] click-able UI
-- [ ] Support CJK characters
+- [x] Support CJK characters
 - [ ] Move into a named TUI platform (I will. maybe)
 - [ ] AUR Support(at this timing, AUR Registration is temporarily closed by Spam :/)
 ## Install / How to setup?
