@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -226,11 +227,48 @@ func titleSimilarity(a, b string) float64 {
 // 高すぎると表記ゆれ吸収の効果が薄れるので、様子を見て調整してよい値。
 const minTitleSimilarity = 0.4
 
-// pickBestMatch は同期歌詞を持ち、かつ検索対象の曲名とある程度似ている候補の中から、
-// 目標の再生時間に一番近いものを選ぶ。
-// アーティスト表記ゆれ等でヒットした複数候補から正しい曲を選別しつつ、
-// 曲名が全然違う無関係な曲（インスト版の検索で拾いがちな別曲など）は弾く。
-func pickBestMatch(results []map[string]interface{}, targetDuration int, targetTitle string) map[string]interface{} {
+// normalizeArtistName は "姓, 名" と "名 姓" のような語順違いを吸収するため、
+// カンマを空白に置き換えてトークンに分割し、アルファベット順に並べ替えてから
+// 結合する。例: "Nakamori, Akina" と "Akina Nakamori" は両方とも
+// "akina nakamori" に正規化されて一致するようになる。
+// (ただし漢字表記とローマ字表記のような、文字種そのものが違う場合は
+// この正規化では救えない。MusicBrainzのエイリアス解決側で吸収する想定。)
+func normalizeArtistName(s string) string {
+	s = strings.ToLower(strings.ReplaceAll(s, ",", " "))
+	tokens := strings.Fields(s)
+	sort.Strings(tokens)
+	return strings.Join(tokens, " ")
+}
+
+// bestSimilarityAgainst は candidate と targets の中で最も高い類似度を返す。
+// targetsが空の場合は「比較対象なし」として1.0(制約なし)を返す。
+func bestSimilarityAgainst(candidate string, targets []string) float64 {
+	if len(targets) == 0 {
+		return 1
+	}
+	best := 0.0
+	normCandidate := normalizeArtistName(candidate)
+	for _, t := range targets {
+		sim := titleSimilarity(normCandidate, normalizeArtistName(t))
+		if sim > best {
+			best = sim
+		}
+	}
+	return best
+}
+
+// minArtistSimilarity を下回る候補は「タイトルは似ているが実際は無関係な
+// アーティストの曲」とみなして除外する。タイトルがありふれた単語だと
+// (例: "不思議")、別のアーティストの同名曲を拾ってしまうことがあるため、
+// タイトル類似度だけでなくアーティスト類似度でも絞り込む。
+const minArtistSimilarity = 0.4
+
+// pickBestMatch は同期歌詞を持ち、かつ検索対象の曲名・アーティスト名と
+// ある程度似ている候補の中から、目標の再生時間に一番近いものを選ぶ。
+// targetArtistsには「元のアーティスト名」に加えてMusicBrainzで解決した
+// 別名義(エイリアス)も渡すことで、表記ゆれは許容しつつ、
+// タイトルが偶然同じなだけの完全に無関係なアーティストの曲は弾く。
+func pickBestMatch(results []map[string]interface{}, targetDuration int, targetTitle string, targetArtists []string) map[string]interface{} {
 	var best map[string]interface{}
 	bestDiff := math.MaxFloat64
 	for _, r := range results {
@@ -241,6 +279,11 @@ func pickBestMatch(results []map[string]interface{}, targetDuration int, targetT
 
 		trackName, _ := r["trackName"].(string)
 		if trackName != "" && titleSimilarity(trackName, targetTitle) < minTitleSimilarity {
+			continue
+		}
+
+		artistName, _ := r["artistName"].(string)
+		if artistName != "" && bestSimilarityAgainst(artistName, targetArtists) < minArtistSimilarity {
 			continue
 		}
 
@@ -369,6 +412,82 @@ func mbResolve(client *http.Client, title, artist string) (canonicalTitle string
 	return rec.Title, artistNames, true
 }
 
+// parseSyncedLyrics はLRC形式の同期歌詞テキストを[]LyricLineにパースする。
+func parseSyncedLyrics(synced string) []LyricLine {
+	var parsed []LyricLine
+	lines := strings.Split(synced, "\n")
+	for _, line := range lines {
+		matches := lyricRe.FindStringSubmatch(strings.TrimSpace(line))
+		if len(matches) >= 5 {
+			min, _ := strconv.Atoi(matches[1])
+			sec, _ := strconv.Atoi(matches[2])
+			msStr := matches[3]
+			text := strings.TrimSpace(matches[4])
+
+			if len(msStr) == 2 {
+				msStr += "0"
+			} else if len(msStr) > 3 {
+				msStr = msStr[:3]
+			}
+			ms, _ := strconv.Atoi(msStr)
+
+			totalSec := float64(min*60+sec) + (float64(ms) / 1000.0)
+			parsed = append(parsed, LyricLine{Time: totalSec, Text: text})
+		}
+	}
+	return parsed
+}
+
+// applyLyricsResult は lrclib のレコード(1件)を実際の表示状態に反映する。
+// リクエストが古くなっていれば(曲が切り替わっていれば)何もしない。
+func applyLyricsResult(result map[string]interface{}, myReqID int) {
+	lyricMutex.Lock()
+	if currentReqID != myReqID {
+		lyricMutex.Unlock()
+		return
+	}
+	if officialArtist, ok := result["artistName"].(string); ok && officialArtist != "" {
+		currentDisplayArtist = officialArtist
+	}
+	synced, _ := result["syncedLyrics"].(string)
+	currentLyrics = parseSyncedLyrics(synced)
+	lyricMutex.Unlock()
+}
+
+// getLyricsExact は lrclib の /api/get で track_name・artist_name・album_name・
+// durationを指定した「厳密一致」の1件取得を試みる。
+//
+// /api/search は人気順・関連度順のランキング検索で、上位の一部しか返さない。
+// そのため自分でアップロードしたばかりの曲のように母数の少ないエントリは、
+// track_name・artist_nameが完全に合っていても検索結果に出てこないことがある。
+// /api/get はMPRISのように track_name/artist_name/album_name/duration が
+// 最初から全部分かっている場合向けの、ランキングを介さない直接取得なので、
+// この用途ではむしろこちらが本筋。
+func getLyricsExact(client *http.Client, title, artist, album string, durationSec int) (map[string]interface{}, bool) {
+	params := url.Values{
+		"track_name":  {title},
+		"artist_name": {artist},
+		"album_name":  {album},
+		"duration":    {strconv.Itoa(durationSec)},
+	}
+	resp, err := client.Get("https://lrclib.net/api/get?" + params.Encode())
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, false
+	}
+	if synced, ok := result["syncedLyrics"].(string); !ok || synced == "" {
+		return nil, false
+	}
+	return result, true
+}
+
 func fetchLyricsAsync(title, artist, album string, durationSec int, myReqID int) {
 	go func() {
 		// インスト版は元々歌詞が存在しないので、無駄なHTTPリクエストを飛ばす前に、
@@ -384,12 +503,27 @@ func fetchLyricsAsync(title, artist, album string, durationSec int, myReqID int)
 
 		client := http.Client{Timeout: 15 * time.Second}
 
-		var allResults []map[string]interface{}
-
 		// "(feat. XXX)" のようなコラボ注釈を除いたタイトル。
 		// lrclib側は注釈なしで登録されていることが多く、
 		// 付いたままだと検索がヒットしなくなるため、こちらを優先的に使う。
 		cleanTitle := cleanTrackTitle(title)
+
+		// まず /api/get で厳密一致の直接取得を試す。
+		// 自分でアップロードした曲のように母数が少なく、ランキング検索
+		// (/api/search)では上位に出てこないエントリでも、track_name/
+		// artist_name/album_name/durationが一致していればここで一発で拾える。
+		if exact, ok := getLyricsExact(&client, cleanTitle, artist, album, durationSec); ok {
+			applyLyricsResult(exact, myReqID)
+			return
+		}
+		if cleanTitle != title {
+			if exact, ok := getLyricsExact(&client, title, artist, album, durationSec); ok {
+				applyLyricsResult(exact, myReqID)
+				return
+			}
+		}
+
+		var allResults []map[string]interface{}
 
 		// 1段目: クリーンタイトル + アーティスト名
 		allResults = append(allResults, searchLyrics(&client, url.Values{
@@ -418,7 +552,11 @@ func fetchLyricsAsync(title, artist, album string, durationSec int, myReqID int)
 		// 5段目: MusicBrainzで正規化したタイトル・アーティストの別名義で検索。
 		// "かめりあ"表記のトラックを"Camellia"名義でlrclibに登録している、
 		// といった表記ゆれをここで吸収する。
+		// ここで集めた別名義は、後段のpickBestMatchで「本当にこのアーティストか」を
+		// 判定するための許容リストとしても使う。
+		targetArtists := []string{artist}
 		if mbTitle, mbArtists, ok := mbResolve(&client, cleanTitle, artist); ok {
+			targetArtists = append(targetArtists, mbArtists...)
 			for _, a := range mbArtists {
 				allResults = append(allResults, searchLyrics(&client, url.Values{
 					"track_name": {mbTitle}, "artist_name": {a},
@@ -445,8 +583,10 @@ func fetchLyricsAsync(title, artist, album string, durationSec int, myReqID int)
 			return
 		}
 
-		// 表記ゆれで違う曲がヒットしていても、再生時間が最も近いものを選ぶ
-		best := pickBestMatch(allResults, durationSec, cleanTitle)
+		// 表記ゆれで違う曲がヒットしていても、再生時間が最も近いものを選ぶ。
+		// ただしタイトルが同じでもアーティストが全く違う曲(例: ありふれた
+		// タイトルの同名異曲)は targetArtists との類似度チェックで弾かれる。
+		best := pickBestMatch(allResults, durationSec, cleanTitle, targetArtists)
 		if best == nil {
 			lyricMutex.Lock()
 			if currentReqID == myReqID {
@@ -456,43 +596,7 @@ func fetchLyricsAsync(title, artist, album string, durationSec int, myReqID int)
 			return
 		}
 
-		if officialArtist, ok := best["artistName"].(string); ok && officialArtist != "" {
-			lyricMutex.Lock()
-			if currentReqID == myReqID {
-				currentDisplayArtist = officialArtist
-			}
-			lyricMutex.Unlock()
-		}
-
-		synced, _ := best["syncedLyrics"].(string)
-
-		var parsed []LyricLine
-		lines := strings.Split(synced, "\n")
-		for _, line := range lines {
-			matches := lyricRe.FindStringSubmatch(strings.TrimSpace(line))
-			if len(matches) >= 5 {
-				min, _ := strconv.Atoi(matches[1])
-				sec, _ := strconv.Atoi(matches[2])
-				msStr := matches[3]
-				text := strings.TrimSpace(matches[4])
-
-				if len(msStr) == 2 {
-					msStr += "0"
-				} else if len(msStr) > 3 {
-					msStr = msStr[:3]
-				}
-				ms, _ := strconv.Atoi(msStr)
-
-				totalSec := float64(min*60+sec) + (float64(ms) / 1000.0)
-				parsed = append(parsed, LyricLine{Time: totalSec, Text: text})
-			}
-		}
-
-		lyricMutex.Lock()
-		if currentReqID == myReqID {
-			currentLyrics = parsed
-		}
-		lyricMutex.Unlock()
+		applyLyricsResult(best, myReqID)
 	}()
 }
 
