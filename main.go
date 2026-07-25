@@ -518,6 +518,7 @@ func main() {
 	var prevTitle string
 	var prevArtist string
 	var lastArtUrl string
+	var prevCols, prevRows int // リサイズ検知用
 
 	// バッファを持たせることで、キー入力の読み取りgoroutineがメインループの
 	// 処理待ちでブロックしにくくする（長押し時の入力詰まり対策の一部）。
@@ -533,6 +534,18 @@ func main() {
 	for {
 		cols, rows, _ := term.GetSize(int(os.Stdout.Fd()))
 
+		// ターミナルのサイズが変わった時だけ全画面クリアする。
+		// 通常のフレームは各行を \033[K で部分クリアしているだけで
+		// 全画面クリアはしていないため、alt-screenバッファ上には
+		// リサイズ前の古い行(特にfooterのテキスト)が消されずに
+		// 残ってしまうことがある。それがターミナルを大きくした時に
+		// 「復活」して見えて、footer行が増殖したように見えるバグの原因。
+		if cols != prevCols || rows != prevRows {
+			fmt.Print("\033[2J")
+			lastArtUrl = "" // ジャケット画像もサイズが変わるので再描画させる
+			prevCols, prevRows = cols, rows
+		}
+
 		if stat, err := os.Stat(themePath); err == nil {
 			if stat.ModTime().After(lastThemeModTime) {
 				theme = loadTheme()
@@ -541,21 +554,33 @@ func main() {
 		}
 
 		pList := cmdOut("-l")
-		if pList == "" {
-			fmt.Print("\033[H\033[K 󰝛 No player found.")
-			time.Sleep(1 * time.Second)
-			continue
+		hasPlayer := pList != ""
+		var p string
+		if hasPlayer {
+			p = strings.Fields(pList)[0]
 		}
-		p := strings.Fields(pList)[0]
 
 		// キー長押し対策: 1ループにつき1個だけ処理するのではなく、
 		// その時点で溜まっている入力を全部処理してから次に進む。
 		// こうしないとオートリピートで溜まったキューの後ろにESCが並んでしまい、
 		// 長押しをやめるまで数秒〜操作不能になる。
+		//
+		// プレイヤーが見つからない場合でも、ESC/Ctrl+Cによる終了操作だけは
+		// 必ず効くようにするため、この処理は「プレイヤーが無ければcontinue」
+		// より前に置いている。以前はプレイヤー未検出時にここへ到達する前に
+		// continueしてしまい、音楽を止めている間は何のキーも一切効かない
+		// （終了すらできない）状態になっていた。
 	drainInput:
 		for {
 			select {
 			case key := <-inputChan:
+				switch key {
+				case 27, 3:
+					return
+				}
+				if !hasPlayer {
+					continue
+				}
 				switch key {
 				case ' ':
 					cmdRun("-p", p, "play-pause")
@@ -585,12 +610,16 @@ func main() {
 					default:
 						cmdRun("-p", p, "loop", "None")
 					}
-				case 27, 3:
-					return
 				}
 			default:
 				break drainInput
 			}
+		}
+
+		if !hasPlayer {
+			fmt.Print("\033[H\033[K 󰝛 No player found.")
+			time.Sleep(1 * time.Second)
+			continue
 		}
 
 		metaOut := cmdOut("-p", p, "metadata", "--format", "{{position}};;{{mpris:length}};;{{volume}};;{{status}};;{{xesam:title}};;{{xesam:artist}};;{{xesam:album}};;{{mpris:artUrl}};;{{shuffle}};;{{loop}}")
@@ -622,12 +651,15 @@ func main() {
 			currentDisplayArtist = info.Artist
 			lyricMutex.Unlock()
 
-			playerNameLower := strings.ToLower(info.Name)
-			if strings.Contains(playerNameLower, "spotify") || strings.Contains(playerNameLower, "mpv") {
+			// 歌詞取得はMPRISのtitle/artist/albumメタデータだけを見ており、
+			// プレイヤー固有の処理は無いので、プレイヤー名によるホワイトリストは
+			// 本来不要（Feishinなどspotify/mpv以外のプレイヤーも普通に動く）。
+			// タイトルが取れていない場合だけ諦める。
+			if info.Title != "" {
 				fetchLyricsAsync(info.Title, info.Artist, info.Album, info.Length, activeID)
 			} else {
 				lyricMutex.Lock()
-				currentLyrics = []LyricLine{{Time: 0, Text: "Lyrics not supported for this player"}}
+				currentLyrics = []LyricLine{{Time: 0, Text: "No track info available"}}
 				lyricMutex.Unlock()
 			}
 
@@ -763,7 +795,7 @@ func main() {
 		}
 		lyricMutex.Unlock()
 
-		fmt.Printf("\033[%d;2H%s[w/s] Vol | [q/e] Prev/Next | [a/d] Seek | [z/x] Shuffle/Loop | [Space] Toggle | [ESC] Quit%s", rows-1, theme.Gray, theme.Reset)
+		fmt.Printf("\033[%d;2H%s[w/s] Vol | [q/e] Prev/Next | [a/d] Seek | [z/x] Shuffle/Loop | [Space] Toggle | [ESC] Quit%s\033[K", rows-1, theme.Gray, theme.Reset)
 
 		fmt.Print("\033[H")
 		time.Sleep(100 * time.Millisecond)
