@@ -112,6 +112,59 @@ func cmdRun(args ...string) {
 	exec.Command("playerctl", args...).Run()
 }
 
+// getArtistList は xesam:artist を --format で1本の文字列に潰さず、
+// 生の複数行のまま取得する。
+//
+// これまでのバグの根本原因: --format "{{xesam:artist}}" を使うと、
+// コラボ曲のように xesam:artist が複数値(例: "Imagine Dragons","Ado")
+// の場合、playerctlが独自のセパレータ(例: "; ")で1本の文字列に
+// 結合してしまう。結果として "Imagine Dragons; Ado" のような、
+// lrclibにもMusicBrainzにも実在しないアーティスト名ができあがり、
+// 厳密一致・検索・MusicBrainz解決・アーティスト類似度フィルタの
+// 全段階が機能しなくなっていた。
+//
+// `playerctl metadata xesam:artist` (--formatなし)で問い合わせると
+// 複数値は1行ずつ出力されるので、ここでそれぞれ個別の要素として取る。
+func getArtistList(p string) []string {
+	out := cmdOut("-p", p, "metadata", "xesam:artist")
+	if out == "" {
+		return nil
+	}
+	lines := strings.Split(out, "\n")
+	var artists []string
+	seen := map[string]bool{}
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l == "" || seen[l] {
+			continue
+		}
+		seen[l] = true
+		artists = append(artists, l)
+	}
+	return artists
+}
+
+// splitArtistsFallback は getArtistList が使えない場合(プレイヤーが
+// 個別プロパティ問い合わせに対応していない等)向けの保険。
+// 既に "; " 等で結合された文字列から、それらしいアーティスト名を
+// 分割して救い出す。
+var artistSplitRe = regexp.MustCompile(`\s*[;,/]\s*|\s+(?:feat\.?|ft\.?|with|&)\s+`)
+
+func splitArtistsFallback(joined string) []string {
+	if joined == "" {
+		return nil
+	}
+	parts := artistSplitRe.Split(joined, -1)
+	var artists []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			artists = append(artists, p)
+		}
+	}
+	return artists
+}
+
 func fetchImage(url string) (image.Image, error) {
 	var r io.ReadCloser
 	if strings.HasPrefix(url, "http") {
@@ -228,13 +281,19 @@ func titleSimilarity(a, b string) float64 {
 const minTitleSimilarity = 0.4
 
 // normalizeArtistName は "姓, 名" と "名 姓" のような語順違いを吸収するため、
-// カンマを空白に置き換えてトークンに分割し、アルファベット順に並べ替えてから
-// 結合する。例: "Nakamori, Akina" と "Akina Nakamori" は両方とも
-// "akina nakamori" に正規化されて一致するようになる。
+// カンマ・セミコロン・アンパサンド・スラッシュを空白に置き換えてトークンに
+// 分割し、アルファベット順に並べ替えてから結合する。例: "Nakamori, Akina" と
+// "Akina Nakamori" は両方とも "akina nakamori" に正規化されて一致するように
+// なる。
+//
+// もともとカンマしか置換していなかったため、"Imagine Dragons; Ado" のような
+// セミコロン結合の複数アーティスト文字列が "dragons;" のようなゴミトークンの
+// まま比較されてしまい、正しい候補まで類似度フィルタで弾かれるバグがあった。
 // (ただし漢字表記とローマ字表記のような、文字種そのものが違う場合は
 // この正規化では救えない。MusicBrainzのエイリアス解決側で吸収する想定。)
 func normalizeArtistName(s string) string {
-	s = strings.ToLower(strings.ReplaceAll(s, ",", " "))
+	replacer := strings.NewReplacer(",", " ", ";", " ", "&", " ", "/", " ")
+	s = replacer.Replace(strings.ToLower(s))
 	tokens := strings.Fields(s)
 	sort.Strings(tokens)
 	return strings.Join(tokens, " ")
@@ -265,8 +324,8 @@ const minArtistSimilarity = 0.4
 
 // pickBestMatch は同期歌詞を持ち、かつ検索対象の曲名・アーティスト名と
 // ある程度似ている候補の中から、目標の再生時間に一番近いものを選ぶ。
-// targetArtistsには「元のアーティスト名」に加えてMusicBrainzで解決した
-// 別名義(エイリアス)も渡すことで、表記ゆれは許容しつつ、
+// targetArtistsには「元のアーティスト名(複数可)」に加えてMusicBrainzで
+// 解決した別名義(エイリアス)も渡すことで、表記ゆれは許容しつつ、
 // タイトルが偶然同じなだけの完全に無関係なアーティストの曲は弾く。
 func pickBestMatch(results []map[string]interface{}, targetDuration int, targetTitle string, targetArtists []string) map[string]interface{} {
 	var best map[string]interface{}
@@ -488,7 +547,17 @@ func getLyricsExact(client *http.Client, title, artist, album string, durationSe
 	return result, true
 }
 
-func fetchLyricsAsync(title, artist, album string, durationSec int, myReqID int) {
+// fetchLyricsAsync は歌詞取得のエントリポイント。
+//
+// artists は「1曲に紐づく全アーティスト名」のスライスで渡す。
+// コラボ曲(例: "Imagine Dragons" + "Ado")の場合、以前は呼び出し側で
+// あらかじめ1本の文字列(例: "Imagine Dragons; Ado")に結合してから
+// 渡していたが、この結合文字列はlrclib/MusicBrainzのどちらにも
+// 実在しないアーティスト名になるため、厳密一致・検索・MB解決・
+// アーティスト類似度フィルタが軒並み機能しなくなり、無関係な曲の歌詞を
+// 拾ってしまう不具合の原因になっていた。
+// 各アーティストを個別の要素として持ち回すことで、この問題を解消する。
+func fetchLyricsAsync(title string, artists []string, album string, durationSec int, myReqID int) {
 	go func() {
 		// インスト版は元々歌詞が存在しないので、無駄なHTTPリクエストを飛ばす前に、
 		// かつ「似たタイトルの無関係な曲」を誤って引っ張ってくる前にここで弾く。
@@ -508,27 +577,37 @@ func fetchLyricsAsync(title, artist, album string, durationSec int, myReqID int)
 		// 付いたままだと検索がヒットしなくなるため、こちらを優先的に使う。
 		cleanTitle := cleanTrackTitle(title)
 
-		// まず /api/get で厳密一致の直接取得を試す。
-		// 自分でアップロードした曲のように母数が少なく、ランキング検索
-		// (/api/search)では上位に出てこないエントリでも、track_name/
-		// artist_name/album_name/durationが一致していればここで一発で拾える。
-		if exact, ok := getLyricsExact(&client, cleanTitle, artist, album, durationSec); ok {
-			applyLyricsResult(exact, myReqID)
-			return
+		// artistsが空(メタデータが取れなかった等)の場合でも、
+		// 空文字1件として扱えば以降のループ処理はそのまま動く。
+		queryArtists := artists
+		if len(queryArtists) == 0 {
+			queryArtists = []string{""}
 		}
-		if cleanTitle != title {
-			if exact, ok := getLyricsExact(&client, title, artist, album, durationSec); ok {
+
+		// まず /api/get で厳密一致の直接取得を試す。個々のアーティスト名
+		// (結合前の生の名前)ごとに試すことで、lrclib側がどのアーティストを
+		// 主表記として登録していても拾えるようにする。
+		for _, a := range queryArtists {
+			if exact, ok := getLyricsExact(&client, cleanTitle, a, album, durationSec); ok {
 				applyLyricsResult(exact, myReqID)
 				return
+			}
+			if cleanTitle != title {
+				if exact, ok := getLyricsExact(&client, title, a, album, durationSec); ok {
+					applyLyricsResult(exact, myReqID)
+					return
+				}
 			}
 		}
 
 		var allResults []map[string]interface{}
 
-		// 1段目: クリーンタイトル + アーティスト名
-		allResults = append(allResults, searchLyrics(&client, url.Values{
-			"track_name": {cleanTitle}, "artist_name": {artist},
-		})...)
+		// 1段目: クリーンタイトル + 各アーティスト名
+		for _, a := range queryArtists {
+			allResults = append(allResults, searchLyrics(&client, url.Values{
+				"track_name": {cleanTitle}, "artist_name": {a},
+			})...)
+		}
 
 		// 2段目: クリーンタイトル + アルバム名（アーティスト表記が違う場合の保険）
 		if album != "" {
@@ -551,17 +630,26 @@ func fetchLyricsAsync(title, artist, album string, durationSec int, myReqID int)
 
 		// 5段目: MusicBrainzで正規化したタイトル・アーティストの別名義で検索。
 		// "かめりあ"表記のトラックを"Camellia"名義でlrclibに登録している、
-		// といった表記ゆれをここで吸収する。
+		// といった表記ゆれをここで吸収する。各アーティストで試し、
+		// 最初に解決できたものを採用する。
 		// ここで集めた別名義は、後段のpickBestMatchで「本当にこのアーティストか」を
 		// 判定するための許容リストとしても使う。
-		targetArtists := []string{artist}
-		if mbTitle, mbArtists, ok := mbResolve(&client, cleanTitle, artist); ok {
+		targetArtists := append([]string{}, artists...)
+		for _, a := range queryArtists {
+			if a == "" {
+				continue
+			}
+			mbTitle, mbArtists, ok := mbResolve(&client, cleanTitle, a)
+			if !ok {
+				continue
+			}
 			targetArtists = append(targetArtists, mbArtists...)
-			for _, a := range mbArtists {
+			for _, ma := range mbArtists {
 				allResults = append(allResults, searchLyrics(&client, url.Values{
-					"track_name": {mbTitle}, "artist_name": {a},
+					"track_name": {mbTitle}, "artist_name": {ma},
 				})...)
 			}
+			break
 		}
 
 		checkReqValid := func() bool {
@@ -755,12 +843,22 @@ func main() {
 			currentDisplayArtist = info.Artist
 			lyricMutex.Unlock()
 
+			// xesam:artist を個別の値のまま取得する。--format で結合された
+			// info.Artist (例: "Imagine Dragons; Ado") をそのまま検索に
+			// 使うと、実在しないアーティスト名として扱われ検索が軒並み
+			// 失敗する。取得できない場合のみ、結合済み文字列を分割した
+			// ものでフォールバックする。
+			artists := getArtistList(p)
+			if len(artists) == 0 {
+				artists = splitArtistsFallback(info.Artist)
+			}
+
 			// 歌詞取得はMPRISのtitle/artist/albumメタデータだけを見ており、
 			// プレイヤー固有の処理は無いので、プレイヤー名によるホワイトリストは
 			// 本来不要（Feishinなどspotify/mpv以外のプレイヤーも普通に動く）。
 			// タイトルが取れていない場合だけ諦める。
 			if info.Title != "" {
-				fetchLyricsAsync(info.Title, info.Artist, info.Album, info.Length, activeID)
+				fetchLyricsAsync(info.Title, artists, info.Album, info.Length, activeID)
 			} else {
 				lyricMutex.Lock()
 				currentLyrics = []LyricLine{{Time: 0, Text: "No track info available"}}
