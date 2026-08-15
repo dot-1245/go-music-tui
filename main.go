@@ -19,7 +19,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/dolmen-go/kittyimg"
 	"github.com/nfnt/resize"
@@ -105,6 +107,31 @@ func loadTheme() Theme {
 		}
 	}
 	return t
+}
+
+// winsize は ioctl(TIOCGWINSZ) が返す構造体。x/term.GetSize は
+// 文字セル数(Row/Col)しか返さないが、この構造体自体にはピクセルサイズ
+// (Xpixel/Ypixel)も含まれている。--noart時のような「画像を端末いっぱいに
+// 広げたい」ケースで、実際の画像ピクセルサイズをどこまで大きくできるか
+// 判断するために使う。
+type winsize struct {
+	Row, Col       uint16
+	Xpixel, Ypixel uint16
+}
+
+// getTermPixelSize は標準出力先の端末の描画領域サイズをピクセル単位で返す。
+// 端末がピクセルサイズを報告しない(0を返す)場合は ok=false。
+func getTermPixelSize() (xpixel, ypixel int, ok bool) {
+	ws := &winsize{}
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
+		uintptr(syscall.Stdout),
+		uintptr(syscall.TIOCGWINSZ),
+		uintptr(unsafe.Pointer(ws)),
+	)
+	if errno != 0 || ws.Xpixel == 0 || ws.Ypixel == 0 {
+		return 0, 0, false
+	}
+	return int(ws.Xpixel), int(ws.Ypixel), true
 }
 
 type PlayerInfo struct {
@@ -719,6 +746,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	// アートのみ / 歌詞のみ表示の場合は、端末いっぱいに広げて表示する
+	isArtOnly := *flagNoInfo && *flagNoLyrics && !*flagNoArt
+	isLyricsOnly := *flagNoInfo && *flagNoArt && !*flagNoLyrics
+
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		panic(err)
@@ -915,8 +946,45 @@ func main() {
 					if rows < 25 {
 						imgSize = 180
 					}
+					posRow, posCol := 2, 2
+
+					if isArtOnly {
+						bounds := img.Bounds()
+						srcW, srcH := bounds.Dx(), bounds.Dy()
+						if srcW > 0 && srcH > 0 {
+							if xpx, ypx, ok := getTermPixelSize(); ok && cols > 0 && rows > 0 {
+								// 端末の実ピクセルサイズが取れる場合は、
+								// アスペクト比を保ったまま画面いっぱいに
+								// 収まる最大サイズを計算し、中央に配置する。
+								scale := float64(xpx) / float64(srcW)
+								if s := float64(ypx) / float64(srcH); s < scale {
+									scale = s
+								}
+								imgSize = uint(float64(srcW) * scale)
+
+								cellW := float64(xpx) / float64(cols)
+								cellH := float64(ypx) / float64(rows)
+								if cellW > 0 && cellH > 0 {
+									dispCellsW := float64(imgSize) / cellW
+									dispCellsH := (float64(srcH) * scale) / cellH
+									posCol = int(float64(cols)/2-dispCellsW/2) + 1
+									posRow = int(float64(rows)/2-dispCellsH/2) + 1
+									if posCol < 1 {
+										posCol = 1
+									}
+									if posRow < 1 {
+										posRow = 1
+									}
+								}
+							} else {
+								// ピクセルサイズを報告しない端末向けの簡易フォールバック
+								imgSize = uint(cols * 9)
+							}
+						}
+					}
+
 					resized := resize.Resize(imgSize, 0, img, resize.Lanczos3)
-					fmt.Print("\033[2;2H")
+					fmt.Printf("\033[%d;%dH", posRow, posCol)
 					kittyimg.Fprintln(os.Stdout, resized)
 					lastArtUrl = info.ArtUrl
 				} else {
@@ -1013,26 +1081,70 @@ func main() {
 				lyricY = 4
 			}
 
-			if len(lyricsSnapshot) == 0 {
+			currentIdx := -1
+			nextIdx := -1
+			for i, line := range lyricsSnapshot {
+				if posSec >= line.Time {
+					currentIdx = i
+				} else {
+					nextIdx = i
+					break
+				}
+			}
+
+			if isLyricsOnly {
+				// 歌詞のみモード: 前後3行だけでなく、端末の縦幅いっぱいまで
+				// 表示行を広げる。マイクアイコンは使わず、現在行を色だけで
+				// ハイライトする。
+				maxLines := rows - 2
+				if maxLines < 1 {
+					maxLines = 1
+				}
+
+				if len(lyricsSnapshot) == 0 {
+					for row := 1; row <= maxLines; row++ {
+						fmt.Printf("\033[%d;%dH\033[K", row, offsetX)
+					}
+				} else {
+					activeIdx := currentIdx
+					if activeIdx == -1 {
+						activeIdx = 0
+					}
+					half := maxLines / 2
+					start := activeIdx - half
+					if start < 0 {
+						start = 0
+					}
+					end := start + maxLines
+					if end > len(lyricsSnapshot) {
+						end = len(lyricsSnapshot)
+						start = end - maxLines
+						if start < 0 {
+							start = 0
+						}
+					}
+
+					row := 1
+					for i := start; i < end; i++ {
+						color := theme.Gray
+						if i == currentIdx {
+							color = theme.Primary
+						}
+						fmt.Printf("\033[%d;%dH%s%s\033[K", row, offsetX, color, lyricsSnapshot[i].Text)
+						row++
+					}
+					for ; row <= maxLines; row++ {
+						fmt.Printf("\033[%d;%dH\033[K", row, offsetX)
+					}
+				}
+			} else if len(lyricsSnapshot) == 0 {
 				// 未取得/取得失敗/インスト版などで歌詞が無い場合は、
 				// "No lyrics found" のようなプレースホルダー文字は出さず、
-				//単に何も表示しない（該当行をクリアするだけ）。
+				// 単に何も表示しない（該当行をクリアするだけ）。
 				fmt.Printf("\033[%d;%dH\033[K", lyricY, offsetX)
 				fmt.Printf("\033[%d;%dH\033[K", lyricY+1, offsetX)
 				fmt.Printf("\033[%d;%dH\033[K", lyricY+2, offsetX)
 			} else {
-				currentIdx := -1
-				nextIdx := -1
-
-				for i, line := range lyricsSnapshot {
-					if posSec >= line.Time {
-						currentIdx = i
-					} else {
-						nextIdx = i
-						break
-					}
-				}
-
 				if currentIdx == -1 {
 					fmt.Printf("\033[%d;%dH\033[K", lyricY, offsetX)
 					if nextIdx != -1 && nextIdx < len(lyricsSnapshot) {
@@ -1059,7 +1171,9 @@ func main() {
 			}
 		}
 
-		fmt.Printf("\033[%d;2H%s[w/s] Vol | [q/e] Prev/Next | [a/d] Seek | [z/x] Shuffle/Loop | [Space] Toggle | [ESC] Quit%s\033[K", rows-1, theme.Gray, theme.Reset)
+		if !*flagNoInfo {
+			fmt.Printf("\033[%d;2H%s[w/s] Vol | [q/e] Prev/Next | [a/d] Seek | [z/x] Shuffle/Loop | [Space] Toggle | [ESC] Quit%s\033[K", rows-1, theme.Gray, theme.Reset)
+		}
 
 		fmt.Print("\033[H")
 		time.Sleep(100 * time.Millisecond)
