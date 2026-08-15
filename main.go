@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"image"
 	_ "image/jpeg"
@@ -23,6 +24,22 @@ import (
 	"github.com/dolmen-go/kittyimg"
 	"github.com/nfnt/resize"
 	"golang.org/x/term"
+)
+
+// --- 表示モードフラグ ---
+//
+// --noinfo   : 曲情報(Status/Title/Artist/Album/App/Shuffle/Loop/Volume/progress bar)を非表示
+// --nolyrics : 歌詞を非表示。描画をスキップするだけでなく、lrclib/MusicBrainzへの
+//              問い合わせ自体を丸ごとスキップするので、歌詞不要時は動作が軽くなる
+// --noart    : アルバムアート(kitty画像プロトコル)を非表示。画像取得(HTTP/ファイル読込)も省略
+//
+// 例:
+//   --noinfo --nolyrics  → アルバムアートのみ
+//   --noinfo --noart     → 歌詞のみ
+var (
+	flagNoInfo   = flag.Bool("noinfo", false, "曲情報とプログレスバーを非表示にする")
+	flagNoLyrics = flag.Bool("nolyrics", false, "歌詞を非表示にする（取得処理自体も省略）")
+	flagNoArt    = flag.Bool("noart", false, "アルバムアートを非表示にする（取得処理自体も省略）")
 )
 
 type Theme struct {
@@ -72,7 +89,13 @@ func loadTheme() Theme {
 			switch key {
 			case "primary":
 				t.Primary = val
-			case "source_color":
+			// 以前は "source_color" をAccentに使っていたが、無彩色(モノクロ)に
+			// 近いアルバムアートの場合、Material Color Utilitiesのスコアリングが
+			// 有効な色を見つけられずGoogleブルー寄りの色(#4285f4等)にフォール
+			// バックしてしまい、他が完全にグレースケールでもAccentだけ青くなる
+			// 不具合があった。"secondary"は同じ無彩色画像でもちゃんとグレーの
+			// トーンになる(実測: #c6c6c6等)ため、こちらを使う。
+			case "secondary":
 				t.Accent = val
 			case "on_error_container":
 				t.SubText = val
@@ -564,7 +587,8 @@ func fetchLyricsAsync(title string, artists []string, album string, durationSec 
 		if isInstrumentalTitle(title) {
 			lyricMutex.Lock()
 			if currentReqID == myReqID {
-				currentLyrics = []LyricLine{{Time: 0, Text: "Instrumental track (no lyrics)"}}
+				// プレースホルダー文字列は出さず、単に「歌詞なし」として空にする
+				currentLyrics = nil
 			}
 			lyricMutex.Unlock()
 			return
@@ -665,7 +689,7 @@ func fetchLyricsAsync(title string, artists []string, album string, durationSec 
 		if len(allResults) == 0 {
 			lyricMutex.Lock()
 			if currentReqID == myReqID {
-				currentLyrics = []LyricLine{{Time: 0, Text: "No lyrics found :("}}
+				currentLyrics = nil
 			}
 			lyricMutex.Unlock()
 			return
@@ -678,7 +702,7 @@ func fetchLyricsAsync(title string, artists []string, album string, durationSec 
 		if best == nil {
 			lyricMutex.Lock()
 			if currentReqID == myReqID {
-				currentLyrics = []LyricLine{{Time: 0, Text: "No synced lyrics available"}}
+				currentLyrics = nil
 			}
 			lyricMutex.Unlock()
 			return
@@ -689,6 +713,12 @@ func fetchLyricsAsync(title string, artists []string, album string, durationSec 
 }
 
 func main() {
+	flag.Parse()
+	if *flagNoInfo && *flagNoLyrics && *flagNoArt {
+		fmt.Fprintln(os.Stderr, "--noinfo --nolyrics --noart を同時に指定することはできません")
+		os.Exit(1)
+	}
+
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		panic(err)
@@ -836,32 +866,40 @@ func main() {
 		if info.Title != prevTitle || info.Artist != prevArtist {
 			theme = loadTheme()
 
-			lyricMutex.Lock()
-			currentReqID++
-			activeID := currentReqID
-			currentLyrics = []LyricLine{{Time: 0, Text: "Loading lyrics..."}}
-			currentDisplayArtist = info.Artist
-			lyricMutex.Unlock()
-
-			// xesam:artist を個別の値のまま取得する。--format で結合された
-			// info.Artist (例: "Imagine Dragons; Ado") をそのまま検索に
-			// 使うと、実在しないアーティスト名として扱われ検索が軒並み
-			// 失敗する。取得できない場合のみ、結合済み文字列を分割した
-			// ものでフォールバックする。
-			artists := getArtistList(p)
-			if len(artists) == 0 {
-				artists = splitArtistsFallback(info.Artist)
-			}
-
-			// 歌詞取得はMPRISのtitle/artist/albumメタデータだけを見ており、
-			// プレイヤー固有の処理は無いので、プレイヤー名によるホワイトリストは
-			// 本来不要（Feishinなどspotify/mpv以外のプレイヤーも普通に動く）。
-			// タイトルが取れていない場合だけ諦める。
-			if info.Title != "" {
-				fetchLyricsAsync(info.Title, artists, info.Album, info.Length, activeID)
-			} else {
+			if !*flagNoLyrics {
 				lyricMutex.Lock()
-				currentLyrics = []LyricLine{{Time: 0, Text: "No track info available"}}
+				currentReqID++
+				activeID := currentReqID
+				currentLyrics = []LyricLine{{Time: 0, Text: "Loading lyrics..."}}
+				currentDisplayArtist = info.Artist
+				lyricMutex.Unlock()
+
+				// xesam:artist を個別の値のまま取得する。--format で結合された
+				// info.Artist (例: "Imagine Dragons; Ado") をそのまま検索に
+				// 使うと、実在しないアーティスト名として扱われ検索が軒並み
+				// 失敗する。取得できない場合のみ、結合済み文字列を分割した
+				// ものでフォールバックする。
+				artists := getArtistList(p)
+				if len(artists) == 0 {
+					artists = splitArtistsFallback(info.Artist)
+				}
+
+				// 歌詞取得はMPRISのtitle/artist/albumメタデータだけを見ており、
+				// プレイヤー固有の処理は無いので、プレイヤー名によるホワイトリストは
+				// 本来不要（Feishinなどspotify/mpv以外のプレイヤーも普通に動く）。
+				// タイトルが取れていない場合だけ諦める。
+				if info.Title != "" {
+					fetchLyricsAsync(info.Title, artists, info.Album, info.Length, activeID)
+				} else {
+					lyricMutex.Lock()
+					currentLyrics = nil
+					lyricMutex.Unlock()
+				}
+			} else {
+				// --nolyrics 時は取得処理自体を丸ごとスキップする。
+				// Info欄の Artist 表示だけは更新しておく。
+				lyricMutex.Lock()
+				currentDisplayArtist = info.Artist
 				lyricMutex.Unlock()
 			}
 
@@ -869,7 +907,7 @@ func main() {
 			prevArtist = info.Artist
 		}
 
-		if info.ArtUrl != lastArtUrl {
+		if !*flagNoArt && info.ArtUrl != lastArtUrl {
 			fmt.Print("\x1b_Ga=d\x1b\\")
 			if info.ArtUrl != "" {
 				if img, err := fetchImage(info.ArtUrl); err == nil {
@@ -899,10 +937,16 @@ func main() {
 		}
 		lyricMutex.Unlock()
 
+		// --noart 時はアルバムアート用の余白が不要になるので、
+		// 左端から使うようにする。
 		offsetX := 40
 		if rows < 25 {
 			offsetX = 32
 		}
+		if *flagNoArt {
+			offsetX = 4
+		}
+
 		draw := func(y int, color, icon, label, text string) {
 			limit := cols - offsetX - 10
 			if limit > 0 {
@@ -917,85 +961,103 @@ func main() {
 			fmt.Printf("\033[%d;%dH%s%s %s%-8s: %s%s\033[K", y, offsetX, color, icon, theme.Gray, label, theme.Reset, text)
 		}
 
-		draw(3, theme.Accent, "󰎈", "Status", info.Status)
-		draw(5, theme.Primary, "󰎆", "Title", info.Title)
-		draw(6, theme.SubText, "󰗡", "Artist", info.Artist)
-		draw(7, theme.Gray, "󰀥", "Album", info.Album)
-		draw(8, theme.Accent, "󰓇", "App", info.Name)
+		if !*flagNoInfo {
+			draw(3, theme.Accent, "󰎈", "Status", info.Status)
+			draw(5, theme.Primary, "󰎆", "Title", info.Title)
+			draw(6, theme.SubText, "󰗡", "Artist", info.Artist)
+			draw(7, theme.Gray, "󰀥", "Album", info.Album)
+			draw(8, theme.Accent, "󰓇", "App", info.Name)
 
-		draw(10, theme.Accent, "󰒝", "Shuffle", info.Shuffle)
-		draw(11, theme.Accent, "󰑐", "Loop", info.Loop)
+			draw(10, theme.Accent, "󰒝", "Shuffle", info.Shuffle)
+			draw(11, theme.Accent, "󰑐", "Loop", info.Loop)
 
-		volW := 12
-		volP := info.Volume * volW / 100
-		if volP > volW {
-			volP = volW
-		}
-		if volP < 0 {
-			volP = 0
-		}
-		volBar := theme.Accent + strings.Repeat("=", volP) + theme.Gray + strings.Repeat("-", volW-volP) + theme.Reset
-		draw(12, theme.Accent, "󰕾", "Volume", fmt.Sprintf("[%s] %d%%", volBar, info.Volume))
-
-		barW := cols - offsetX - 18
-		if barW < 10 {
-			barW = 10
-		}
-		prog := 0
-		if info.Length > 0 {
-			prog = info.Position * barW / info.Length
-		}
-		if prog > barW {
-			prog = barW
-		}
-		if prog < 0 {
-			prog = 0
-		}
-
-		barStr := theme.Accent + strings.Repeat("=", prog) + theme.Gray + strings.Repeat("-", barW-prog) + theme.Reset
-		timeStr := fmt.Sprintf("%02d:%02d / %02d:%02d", info.Position/60, info.Position%60, info.Length/60, info.Length%60)
-		fmt.Printf("\033[14;%dH%s  %s\033[K", offsetX, barStr, timeStr)
-
-		lyricMutex.Lock()
-		currentText := "..."
-		currentIdx := -1
-		nextIdx := -1
-
-		for i, line := range currentLyrics {
-			if posSec >= line.Time {
-				currentIdx = i
-			} else {
-				nextIdx = i
-				break
+			volW := 12
+			volP := info.Volume * volW / 100
+			if volP > volW {
+				volP = volW
 			}
+			if volP < 0 {
+				volP = 0
+			}
+			volBar := theme.Accent + strings.Repeat("=", volP) + theme.Gray + strings.Repeat("-", volW-volP) + theme.Reset
+			draw(12, theme.Accent, "󰕾", "Volume", fmt.Sprintf("[%s] %d%%", volBar, info.Volume))
+
+			barW := cols - offsetX - 18
+			if barW < 10 {
+				barW = 10
+			}
+			prog := 0
+			if info.Length > 0 {
+				prog = info.Position * barW / info.Length
+			}
+			if prog > barW {
+				prog = barW
+			}
+			if prog < 0 {
+				prog = 0
+			}
+
+			barStr := theme.Accent + strings.Repeat("=", prog) + theme.Gray + strings.Repeat("-", barW-prog) + theme.Reset
+			timeStr := fmt.Sprintf("%02d:%02d / %02d:%02d", info.Position/60, info.Position%60, info.Length/60, info.Length%60)
+			fmt.Printf("\033[14;%dH%s  %s\033[K", offsetX, barStr, timeStr)
 		}
 
-		lyricY := 17
+		if !*flagNoLyrics {
+			lyricMutex.Lock()
+			lyricsSnapshot := currentLyrics
+			lyricMutex.Unlock()
 
-		if currentIdx == -1 {
-			fmt.Printf("\033[%d;%dH\033[K", lyricY, offsetX)
-			fmt.Printf("\033[%d;%dH%s🎤 %s\033[K", lyricY+1, offsetX, theme.Gray, currentText)
-			if nextIdx != -1 && nextIdx < len(currentLyrics) {
-				fmt.Printf("\033[%d;%dH%s%s\033[K", lyricY+2, offsetX, theme.Gray, currentLyrics[nextIdx].Text)
-			} else {
-				fmt.Printf("\033[%d;%dH\033[K", lyricY+2, offsetX)
+			// --noinfo 時は情報欄が無いので、歌詞を上に詰めて表示する。
+			lyricY := 17
+			if *flagNoInfo {
+				lyricY = 4
 			}
-		} else {
-			currentText = currentLyrics[currentIdx].Text
 
-			if currentIdx > 0 {
-				fmt.Printf("\033[%d;%dH%s%s\033[K", lyricY, offsetX, theme.Gray, currentLyrics[currentIdx-1].Text)
-			} else {
+			if len(lyricsSnapshot) == 0 {
+				// 未取得/取得失敗/インスト版などで歌詞が無い場合は、
+				// "No lyrics found" のようなプレースホルダー文字は出さず、
+				//単に何も表示しない（該当行をクリアするだけ）。
 				fmt.Printf("\033[%d;%dH\033[K", lyricY, offsetX)
-			}
-			fmt.Printf("\033[%d;%dH%s🎤 %s\033[K", lyricY+1, offsetX, theme.Primary, currentText)
-			if currentIdx+1 < len(currentLyrics) {
-				fmt.Printf("\033[%d;%dH%s%s\033[K", lyricY+2, offsetX, theme.Gray, currentLyrics[currentIdx+1].Text)
-			} else {
+				fmt.Printf("\033[%d;%dH\033[K", lyricY+1, offsetX)
 				fmt.Printf("\033[%d;%dH\033[K", lyricY+2, offsetX)
+			} else {
+				currentIdx := -1
+				nextIdx := -1
+
+				for i, line := range lyricsSnapshot {
+					if posSec >= line.Time {
+						currentIdx = i
+					} else {
+						nextIdx = i
+						break
+					}
+				}
+
+				if currentIdx == -1 {
+					fmt.Printf("\033[%d;%dH\033[K", lyricY, offsetX)
+					if nextIdx != -1 && nextIdx < len(lyricsSnapshot) {
+						fmt.Printf("\033[%d;%dH%s🎤 %s\033[K", lyricY+1, offsetX, theme.Gray, lyricsSnapshot[nextIdx].Text)
+					} else {
+						fmt.Printf("\033[%d;%dH\033[K", lyricY+1, offsetX)
+					}
+					fmt.Printf("\033[%d;%dH\033[K", lyricY+2, offsetX)
+				} else {
+					currentText := lyricsSnapshot[currentIdx].Text
+
+					if currentIdx > 0 {
+						fmt.Printf("\033[%d;%dH%s%s\033[K", lyricY, offsetX, theme.Gray, lyricsSnapshot[currentIdx-1].Text)
+					} else {
+						fmt.Printf("\033[%d;%dH\033[K", lyricY, offsetX)
+					}
+					fmt.Printf("\033[%d;%dH%s🎤 %s\033[K", lyricY+1, offsetX, theme.Primary, currentText)
+					if currentIdx+1 < len(lyricsSnapshot) {
+						fmt.Printf("\033[%d;%dH%s%s\033[K", lyricY+2, offsetX, theme.Gray, lyricsSnapshot[currentIdx+1].Text)
+					} else {
+						fmt.Printf("\033[%d;%dH\033[K", lyricY+2, offsetX)
+					}
+				}
 			}
 		}
-		lyricMutex.Unlock()
 
 		fmt.Printf("\033[%d;2H%s[w/s] Vol | [q/e] Prev/Next | [a/d] Seek | [z/x] Shuffle/Loop | [Space] Toggle | [ESC] Quit%s\033[K", rows-1, theme.Gray, theme.Reset)
 
