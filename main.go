@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -32,17 +33,59 @@ import (
 //
 // --noinfo   : 曲情報(Status/Title/Artist/Album/App/Shuffle/Loop/Volume/progress bar)を非表示
 // --nolyrics : 歌詞を非表示。描画をスキップするだけでなく、lrclib/MusicBrainzへの
-//              問い合わせ自体を丸ごとスキップするので、歌詞不要時は動作が軽くなる
+//
+//	問い合わせ自体を丸ごとスキップするので、歌詞不要時は動作が軽くなる
+//
 // --noart    : アルバムアート(kitty画像プロトコル)を非表示。画像取得(HTTP/ファイル読込)も省略
 //
 // 例:
-//   --noinfo --nolyrics  → アルバムアートのみ
-//   --noinfo --noart     → 歌詞のみ
+//
+//	--noinfo --nolyrics  → アルバムアートのみ
+//	--noinfo --noart     → 歌詞のみ
 var (
 	flagNoInfo   = flag.Bool("noinfo", false, "曲情報とプログレスバーを非表示にする")
 	flagNoLyrics = flag.Bool("nolyrics", false, "歌詞を非表示にする（取得処理自体も省略）")
 	flagNoArt    = flag.Bool("noart", false, "アルバムアートを非表示にする（取得処理自体も省略）")
+	// --debug: 歌詞取得の各段階(検索クエリ・HTTPエラー・類似度フィルタでの
+	// 却下理由・最終的にどの候補を選んだか等)を ~/.cache/go-music-tui-debug.log
+	// に書き出す。TUI自体は画面を占有しているのでstdout/stderrには出さず、
+	// 別途 `tail -f ~/.cache/go-music-tui-debug.log` で追いかける想定。
+	flagDebug = flag.Bool("debug", false, "歌詞取得の詳細ログを ~/.cache/go-music-tui-debug.log に出力する")
 )
+
+var (
+	debugLogFile *os.File
+	debugMutex   sync.Mutex
+)
+
+// initDebugLog は --debug 指定時にログファイルを開く。失敗した場合は
+// デバッグログ無効のまま続行する(ログが取れないだけで本体機能には影響しない)。
+func initDebugLog() {
+	if !*flagDebug {
+		return
+	}
+	home, _ := os.UserHomeDir()
+	dir := home + "/.cache"
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "go-music-tui-debug.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	debugLogFile = f
+}
+
+// debugf は --debug 指定時のみログファイルに1行書き込む。非指定時は
+// ほぼノーコスト(bool判定のみ)なので、通常経路にそのまま埋め込んでよい。
+func debugf(format string, args ...interface{}) {
+	if !*flagDebug || debugLogFile == nil {
+		return
+	}
+	debugMutex.Lock()
+	defer debugMutex.Unlock()
+	fmt.Fprintf(debugLogFile, "[%s] %s\n", time.Now().Format("15:04:05.000"), fmt.Sprintf(format, args...))
+}
 
 type Theme struct {
 	Primary, Accent, SubText, Gray, Reset string
@@ -215,6 +258,39 @@ func splitArtistsFallback(joined string) []string {
 	return artists
 }
 
+// flattenArtists は getArtistList が返した各要素をさらに splitArtistsFallback
+// で割り、重複を除いて返す。
+//
+// getArtistList は xesam:artist を playerctl の配列プロパティとして個別に
+// 取得しているにもかかわらず、プレイヤー側(特定のSpotifyクライアント連携等)が
+// そもそもMPRIS上で xesam:artist を ["Imagine Dragons, Ado"] のように
+// "1要素にカンマ結合した状態" で公開しているケースが確認されている。
+// この場合 getArtistList は(正しく動作した上で)結合済みの1要素をそのまま
+// 返してしまい、後段の lrclib への問い合わせが
+// artist_name="Imagine Dragons, Ado" という実在しない名前で飛んでしまう。
+// これが原因で、たまたま別の(無関係な)エントリに一致してしまい、
+// 本来と異なる歌詞が表示される不具合につながっていた。
+// ここで各要素にもう一段 splitArtistsFallback をかけることで、
+// getArtistList側が正しく分割できていてもできていなくても、
+// 最終的には個別のアーティスト名の集合になるようにする。
+func flattenArtists(artists []string) []string {
+	var flattened []string
+	seen := map[string]bool{}
+	for _, a := range artists {
+		parts := splitArtistsFallback(a)
+		if len(parts) == 0 {
+			parts = []string{a}
+		}
+		for _, p := range parts {
+			if p != "" && !seen[p] {
+				seen[p] = true
+				flattened = append(flattened, p)
+			}
+		}
+	}
+	return flattened
+}
+
 func fetchImage(url string) (image.Image, error) {
 	var r io.ReadCloser
 	if strings.HasPrefix(url, "http") {
@@ -261,11 +337,16 @@ func isInstrumentalTitle(title string) bool {
 func searchLyrics(client *http.Client, params url.Values) []map[string]interface{} {
 	resp, err := client.Get("https://lrclib.net/api/search?" + params.Encode())
 	if err != nil {
+		debugf("  search HTTP error (%s): %v", params.Encode(), err)
 		return nil
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		debugf("  search unexpected status %d (%s)", resp.StatusCode, params.Encode())
+	}
 	var results []map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+		debugf("  search decode error (%s): %v", params.Encode(), err)
 		return nil
 	}
 	return results
@@ -387,17 +468,25 @@ func pickBestMatch(results []map[string]interface{}, targetDuration int, targetT
 		}
 
 		trackName, _ := r["trackName"].(string)
-		if trackName != "" && titleSimilarity(trackName, targetTitle) < minTitleSimilarity {
-			continue
+		artistName, _ := r["artistName"].(string)
+
+		if trackName != "" {
+			if sim := titleSimilarity(trackName, targetTitle); sim < minTitleSimilarity {
+				debugf("  reject %q / %q: title similarity %.2f < %.2f (target title=%q)", trackName, artistName, sim, minTitleSimilarity, targetTitle)
+				continue
+			}
 		}
 
-		artistName, _ := r["artistName"].(string)
-		if artistName != "" && bestSimilarityAgainst(artistName, targetArtists) < minArtistSimilarity {
-			continue
+		if artistName != "" {
+			if sim := bestSimilarityAgainst(artistName, targetArtists); sim < minArtistSimilarity {
+				debugf("  reject %q / %q: artist similarity %.2f < %.2f (target artists=%v)", trackName, artistName, sim, minArtistSimilarity, targetArtists)
+				continue
+			}
 		}
 
 		dur, _ := r["duration"].(float64)
 		diff := math.Abs(dur - float64(targetDuration))
+		debugf("  candidate %q / %q: durationDiff=%.1fs (theirs=%.0fs, target=%ds)", trackName, artistName, diff, dur, targetDuration)
 		if diff < bestDiff {
 			bestDiff = diff
 			best = r
@@ -480,15 +569,22 @@ func mbResolve(client *http.Client, title, artist string) (canonicalTitle string
 	q := fmt.Sprintf(`recording:"%s" AND artist:"%s"`, mbQueryEscape(title), mbQueryEscape(artist))
 	body, err := mbGet(client, "recording?query="+url.QueryEscape(q)+"&fmt=json&limit=5")
 	if err != nil {
+		debugf("  musicbrainz HTTP error (query=%q): %v", q, err)
 		return "", nil, false
 	}
 	var result mbSearchResp
-	if err := json.Unmarshal(body, &result); err != nil || len(result.Recordings) == 0 {
+	if err := json.Unmarshal(body, &result); err != nil {
+		debugf("  musicbrainz decode error (query=%q): %v", q, err)
+		return "", nil, false
+	}
+	if len(result.Recordings) == 0 {
+		debugf("  musicbrainz: no recordings for query=%q", q)
 		return "", nil, false
 	}
 
 	rec := result.Recordings[0]
 	if rec.Title == "" || len(rec.ArtistCredit) == 0 {
+		debugf("  musicbrainz: first recording missing title/artist-credit (query=%q)", q)
 		return "", nil, false
 	}
 
@@ -581,17 +677,21 @@ func getLyricsExact(client *http.Client, title, artist, album string, durationSe
 	}
 	resp, err := client.Get("https://lrclib.net/api/get?" + params.Encode())
 	if err != nil {
+		debugf("  exact-get HTTP error (title=%q artist=%q): %v", title, artist, err)
 		return nil, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		debugf("  exact-get status %d (title=%q artist=%q album=%q duration=%d)", resp.StatusCode, title, artist, album, durationSec)
 		return nil, false
 	}
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		debugf("  exact-get decode error (title=%q artist=%q): %v", title, artist, err)
 		return nil, false
 	}
 	if synced, ok := result["syncedLyrics"].(string); !ok || synced == "" {
+		debugf("  exact-get hit but has no syncedLyrics (title=%q artist=%q)", title, artist)
 		return nil, false
 	}
 	return result, true
@@ -609,9 +709,12 @@ func getLyricsExact(client *http.Client, title, artist, album string, durationSe
 // 各アーティストを個別の要素として持ち回すことで、この問題を解消する。
 func fetchLyricsAsync(title string, artists []string, album string, durationSec int, myReqID int) {
 	go func() {
+		debugf("=== fetch start: title=%q artists=%v album=%q duration=%ds (reqID=%d)", title, artists, album, durationSec, myReqID)
+
 		// インスト版は元々歌詞が存在しないので、無駄なHTTPリクエストを飛ばす前に、
 		// かつ「似たタイトルの無関係な曲」を誤って引っ張ってくる前にここで弾く。
 		if isInstrumentalTitle(title) {
+			debugf("=> skipped: title matched instrumental pattern")
 			lyricMutex.Lock()
 			if currentReqID == myReqID {
 				// プレースホルダー文字列は出さず、単に「歌詞なし」として空にする
@@ -627,11 +730,15 @@ func fetchLyricsAsync(title string, artists []string, album string, durationSec 
 		// lrclib側は注釈なしで登録されていることが多く、
 		// 付いたままだと検索がヒットしなくなるため、こちらを優先的に使う。
 		cleanTitle := cleanTrackTitle(title)
+		if cleanTitle != title {
+			debugf("cleaned title: %q -> %q", title, cleanTitle)
+		}
 
 		// artistsが空(メタデータが取れなかった等)の場合でも、
 		// 空文字1件として扱えば以降のループ処理はそのまま動く。
 		queryArtists := artists
 		if len(queryArtists) == 0 {
+			debugf("no artist metadata from playerctl, falling back to empty artist")
 			queryArtists = []string{""}
 		}
 
@@ -640,43 +747,56 @@ func fetchLyricsAsync(title string, artists []string, album string, durationSec 
 		// 主表記として登録していても拾えるようにする。
 		for _, a := range queryArtists {
 			if exact, ok := getLyricsExact(&client, cleanTitle, a, album, durationSec); ok {
+				debugf("=> exact match via /api/get: query(title=%q artist=%q) -> lrclib id=%v artistName=%v albumName=%v duration=%v",
+					cleanTitle, a, exact["id"], exact["artistName"], exact["albumName"], exact["duration"])
 				applyLyricsResult(exact, myReqID)
 				return
 			}
 			if cleanTitle != title {
 				if exact, ok := getLyricsExact(&client, title, a, album, durationSec); ok {
+					debugf("=> exact match via /api/get (uncleaned title): query(title=%q artist=%q) -> lrclib id=%v artistName=%v albumName=%v duration=%v",
+						title, a, exact["id"], exact["artistName"], exact["albumName"], exact["duration"])
 					applyLyricsResult(exact, myReqID)
 					return
 				}
 			}
 		}
+		debugf("no exact match via /api/get, falling back to /api/search")
 
 		var allResults []map[string]interface{}
 
 		// 1段目: クリーンタイトル + 各アーティスト名
 		for _, a := range queryArtists {
-			allResults = append(allResults, searchLyrics(&client, url.Values{
+			res := searchLyrics(&client, url.Values{
 				"track_name": {cleanTitle}, "artist_name": {a},
-			})...)
+			})
+			debugf("stage1 search track_name=%q artist_name=%q -> %d results", cleanTitle, a, len(res))
+			allResults = append(allResults, res...)
 		}
 
 		// 2段目: クリーンタイトル + アルバム名（アーティスト表記が違う場合の保険）
 		if album != "" {
-			allResults = append(allResults, searchLyrics(&client, url.Values{
+			res := searchLyrics(&client, url.Values{
 				"track_name": {cleanTitle}, "album_name": {album},
-			})...)
+			})
+			debugf("stage2 search track_name=%q album_name=%q -> %d results", cleanTitle, album, len(res))
+			allResults = append(allResults, res...)
 		}
 
 		// 3段目: クリーンタイトルのみ（アーティスト名がローマ字/現地語などで一致しない場合の保険）
-		allResults = append(allResults, searchLyrics(&client, url.Values{
+		res3 := searchLyrics(&client, url.Values{
 			"track_name": {cleanTitle},
-		})...)
+		})
+		debugf("stage3 search track_name=%q -> %d results", cleanTitle, len(res3))
+		allResults = append(allResults, res3...)
 
 		// 4段目: 元のタイトルそのまま（逆に feat. 込みで登録されているレアケースの保険）
 		if cleanTitle != title {
-			allResults = append(allResults, searchLyrics(&client, url.Values{
+			res4 := searchLyrics(&client, url.Values{
 				"track_name": {title},
-			})...)
+			})
+			debugf("stage4 search track_name=%q (uncleaned) -> %d results", title, len(res4))
+			allResults = append(allResults, res4...)
 		}
 
 		// 5段目: MusicBrainzで正規化したタイトル・アーティストの別名義で検索。
@@ -694,14 +814,19 @@ func fetchLyricsAsync(title string, artists []string, album string, durationSec 
 			if !ok {
 				continue
 			}
+			debugf("musicbrainz resolved artist=%q -> title=%q aliases=%v", a, mbTitle, mbArtists)
 			targetArtists = append(targetArtists, mbArtists...)
 			for _, ma := range mbArtists {
-				allResults = append(allResults, searchLyrics(&client, url.Values{
+				res5 := searchLyrics(&client, url.Values{
 					"track_name": {mbTitle}, "artist_name": {ma},
-				})...)
+				})
+				debugf("stage5 search track_name=%q artist_name=%q -> %d results", mbTitle, ma, len(res5))
+				allResults = append(allResults, res5...)
 			}
 			break
 		}
+
+		debugf("total raw results collected: %d", len(allResults))
 
 		checkReqValid := func() bool {
 			lyricMutex.Lock()
@@ -710,10 +835,12 @@ func fetchLyricsAsync(title string, artists []string, album string, durationSec 
 		}
 
 		if !checkReqValid() {
+			debugf("=> abandoned: track changed again before fetch finished (reqID=%d)", myReqID)
 			return
 		}
 
 		if len(allResults) == 0 {
+			debugf("=> giving up: no results from any search stage (reqID=%d)", myReqID)
 			lyricMutex.Lock()
 			if currentReqID == myReqID {
 				currentLyrics = nil
@@ -725,8 +852,10 @@ func fetchLyricsAsync(title string, artists []string, album string, durationSec 
 		// 表記ゆれで違う曲がヒットしていても、再生時間が最も近いものを選ぶ。
 		// ただしタイトルが同じでもアーティストが全く違う曲(例: ありふれた
 		// タイトルの同名異曲)は targetArtists との類似度チェックで弾かれる。
+		debugf("evaluating %d candidates against title=%q artists=%v", len(allResults), cleanTitle, targetArtists)
 		best := pickBestMatch(allResults, durationSec, cleanTitle, targetArtists)
 		if best == nil {
+			debugf("=> giving up: every candidate was rejected by the similarity filters (reqID=%d)", myReqID)
 			lyricMutex.Lock()
 			if currentReqID == myReqID {
 				currentLyrics = nil
@@ -734,6 +863,7 @@ func fetchLyricsAsync(title string, artists []string, album string, durationSec 
 			lyricMutex.Unlock()
 			return
 		}
+		debugf("=> selected: lrclib id=%v track=%v artist=%v album=%v (reqID=%d)", best["id"], best["trackName"], best["artistName"], best["albumName"], myReqID)
 
 		applyLyricsResult(best, myReqID)
 	}()
@@ -745,6 +875,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "--noinfo --nolyrics --noart を同時に指定することはできません")
 		os.Exit(1)
 	}
+
+	initDebugLog()
+	if debugLogFile != nil {
+		defer debugLogFile.Close()
+	}
+	debugf("==== go-music-tui started (noinfo=%v nolyrics=%v noart=%v) ====", *flagNoInfo, *flagNoLyrics, *flagNoArt)
 
 	// アートのみ / 歌詞のみ表示の場合は、端末いっぱいに広げて表示する
 	isArtOnly := *flagNoInfo && *flagNoLyrics && !*flagNoArt
@@ -895,6 +1031,7 @@ func main() {
 		}
 
 		if info.Title != prevTitle || info.Artist != prevArtist {
+			debugf("track changed: %q/%q -> %q/%q", prevTitle, prevArtist, info.Title, info.Artist)
 			theme = loadTheme()
 
 			if !*flagNoLyrics {
@@ -913,6 +1050,13 @@ func main() {
 				artists := getArtistList(p)
 				if len(artists) == 0 {
 					artists = splitArtistsFallback(info.Artist)
+				}
+				// プレイヤーがxesam:artistを1要素にカンマ結合したまま公開している
+				// ケースがあるため、ここでもう一段バラす(flattenArtistsのコメント参照)。
+				beforeFlatten := artists
+				artists = flattenArtists(artists)
+				if len(artists) != len(beforeFlatten) {
+					debugf("artists flattened: %v -> %v", beforeFlatten, artists)
 				}
 
 				// 歌詞取得はMPRISのtitle/artist/albumメタデータだけを見ており、
