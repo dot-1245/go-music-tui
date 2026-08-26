@@ -12,9 +12,12 @@ a beautiful tui music viewer with playerctl written in Go
 - [x] kitty album art
 - [ ] Customizable KeyConfig
 - [ ] TTY Color support
-- [ ] No Lyrics mode
-- [ ] No Album-art mode
+- [x] No Lyrics mode
+- [x] No Album-art mode
 - [ ] click-able UI
+- [ ] karaoke/Enhanced lyrics
+- [ ] local-lyrics
+- [ ] custom lyrics API
 - [x] Support CJK characters
 - [ ] Move into a named TUI platform (I will. maybe)
 - [ ] AUR Support(at this timing, AUR Registration is temporarily closed by Spam :/)
@@ -25,7 +28,7 @@ a beautiful tui music viewer with playerctl written in Go
 - **Go(1.26+ Recommended)**
 - **Terminal supported kittyimg (kitty recommended)**
 - matugen(advanced)
-- **any MPRIS supported Player (Recommend mpv+mpv-mpris or spotify, Firefox and Firefox-Fork suck at providing artwork)**
+- **any MPRIS supported Player (Recommend mpv+mpv-mpris or spotify, or YTM. ~~Firefox and Firefox-Fork~~ youtube.com suck at providing artwork)**
 - **any Nerd Fonts**
 ## Auto Install With Go (Recommended)
 ```bash
