@@ -8,14 +8,14 @@ a beautiful tui music viewer with playerctl written in Go
 > This project is Fully Vibe-coding with Gemini/gh copilot
 
 ## Todo
-- [x] Live Lyrics from lrclib
+- [x] Live lyrics from lrclib / SyncLRC / AMLL
 - [x] kitty album art
 - [ ] Customizable KeyConfig
 - [ ] TTY Color support
 - [x] No Lyrics mode
 - [x] No Album-art mode
 - [ ] click-able UI
-- [ ] karaoke/Enhanced lyrics
+- [x] karaoke/Enhanced lyrics
 - [ ] local-lyrics
 - [ ] custom lyrics API
 - [x] Support CJK characters
@@ -30,6 +30,7 @@ a beautiful tui music viewer with playerctl written in Go
 - matugen(advanced)
 - **any MPRIS supported Player (Recommend mpv+mpv-mpris or spotify, or YTM. ~~Firefox and Firefox-Fork~~ youtube.com suck at providing artwork)**
 - **any Nerd Fonts**
+- Network access to the lyric providers is required for live and karaoke lyrics.
 ## Auto Install With Go (Recommended)
 ```bash
 go install github.com/dot-1245/go-music-tui@latest
