@@ -3,10 +3,12 @@ package main
 import (
 	"math"
 	"testing"
+
+	"github.com/dot-1245/go-music-tui/internal/lyrics"
 )
 
 func TestParseEnhancedLRC(t *testing.T) {
-	lines := parseSyncedLyrics("[00:01.20]<00:01.20>Hello <00:01.50>world\n[00:03]Next")
+	lines := lyrics.ParseSyncedLyrics("[00:01.20]<00:01.20>Hello <00:01.50>world\n[00:03]Next")
 	if len(lines) != 2 {
 		t.Fatalf("got %d lines, want 2", len(lines))
 	}
@@ -28,7 +30,7 @@ func TestParseEnhancedLRC(t *testing.T) {
 }
 
 func TestParseStandardLRC(t *testing.T) {
-	lines := parseSyncedLyrics("[00:01.2]first\n[00:02.34]second")
+	lines := lyrics.ParseSyncedLyrics("[00:01.2]first\n[00:02.34]second")
 	if len(lines) != 2 {
 		t.Fatalf("got %d lines, want 2", len(lines))
 	}
@@ -37,6 +39,24 @@ func TestParseStandardLRC(t *testing.T) {
 	}
 	if len(lines[0].Words) != 0 || len(lines[1].Words) != 0 {
 		t.Fatalf("ordinary LRC unexpectedly produced word timings: %#v", lines)
+	}
+}
+
+func TestParseLRCRejectsInvalidSecondField(t *testing.T) {
+	lines := lyrics.ParseSyncedLyrics("[00:60]invalid\n[01:02]valid")
+	if len(lines) != 1 || lines[0].Text != "valid" {
+		t.Fatalf("invalid timestamp was accepted: %#v", lines)
+	}
+}
+
+func TestInstrumentalTitleDetection(t *testing.T) {
+	for _, title := range []string{"Song (Instrumental)", "Song - off vocal", "Karaoke"} {
+		if !lyrics.IsInstrumentalTitle(title) {
+			t.Fatalf("instrumental title was not detected: %q", title)
+		}
+	}
+	if lyrics.IsInstrumentalTitle("Instrumentalize") {
+		t.Fatal("ordinary title was misclassified as instrumental")
 	}
 }
 
@@ -54,7 +74,7 @@ lines:
       - start_ms: 1500
         text: "world"
 `
-	lines, err := parseLyricsfile(source)
+	lines, err := lyrics.ParseLyricsfile(source)
 	if err != nil {
 		t.Fatalf("parseLyricsfile returned error: %v", err)
 	}
@@ -76,7 +96,7 @@ func TestParseTTMLLyrics(t *testing.T) {
   <span ttm:role="x-translation">hello</span>
 </p>
 </div></body></tt>`
-	lines, err := parseTTMLLyrics(source)
+	lines, err := lyrics.ParseTTMLLyrics(source)
 	if err != nil {
 		t.Fatalf("parseTTMLLyrics returned error: %v", err)
 	}
@@ -91,6 +111,17 @@ func TestParseTTMLLyrics(t *testing.T) {
 	}
 }
 
+func TestParseTTMLLyricsSeparatesAdjacentLatinSpans(t *testing.T) {
+	source := `<tt><body><div><p begin="1s" end="3s"><span begin="1s">hello</span><span begin="2s">world</span></p></div></body></tt>`
+	lines, err := lyrics.ParseTTMLLyrics(source)
+	if err != nil {
+		t.Fatalf("ParseTTMLLyrics returned error: %v", err)
+	}
+	if len(lines) != 1 || lines[0].Text != "hello world" {
+		t.Fatalf("adjacent Latin spans were joined incorrectly: %#v", lines)
+	}
+}
+
 func TestSyncLRCResult(t *testing.T) {
 	payload := map[string]interface{}{
 		"track":    "Test Track",
@@ -99,7 +130,7 @@ func TestSyncLRCResult(t *testing.T) {
 		"type":     "karaoke",
 		"lyrics":   "[00:00.00]<00:00.00>Test <00:00.50>Track",
 	}
-	result := syncLRCResult(payload)
+	result := lyrics.ParseSyncLRCResult(payload)
 	if result == nil {
 		t.Fatal("syncLRCResult returned nil")
 	}
@@ -112,23 +143,23 @@ func TestSyncLRCResult(t *testing.T) {
 }
 
 func TestStripLeadingLyricMetadata(t *testing.T) {
-	lines := parseSyncedLyrics("[00:00]<00:00>Track <00:00>(Artist)\n[00:03]Real lyric")
-	lines = stripLeadingLyricMetadata(lines, "Track", []string{"Artist"})
+	lines := lyrics.ParseSyncedLyrics("[00:00]<00:00>Track <00:00>(Artist)\n[00:03]Real lyric")
+	lines = lyrics.StripLeadingLyricMetadata(lines, "Track", []string{"Artist"})
 	if len(lines) != 1 || lines[0].Text != "Real lyric" {
 		t.Fatalf("metadata was not stripped: %#v", lines)
 	}
 }
 
 func TestBetterLyricResultPrefersWordSync(t *testing.T) {
-	ordinary := &lyricResult{
+	ordinary := &lyrics.Result{
 		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
-		Lines: []LyricLine{{Time: 0, Text: "track"}}, Quality: 390,
+		Lines: []lyrics.Line{{Time: 0, Text: "track"}}, Quality: 390,
 	}
-	karaoke := &lyricResult{
+	karaoke := &lyrics.Result{
 		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
-		Lines: []LyricLine{{Time: 0, Text: "track", Words: []LyricWord{{Time: 0, Text: "track"}}}}, Quality: 600,
+		Lines: []lyrics.Line{{Time: 0, Text: "track", Words: []lyrics.Word{{Time: 0, Text: "track"}}}}, Quality: 600,
 	}
-	if !betterLyricResult(karaoke, ordinary, 120, "Track", []string{"Artist"}, "Album") {
+	if !lyrics.BetterResult(karaoke, ordinary, 120, "Track", []string{"Artist"}, "Album") {
 		t.Fatal("word-synced result did not beat ordinary result")
 	}
 }
