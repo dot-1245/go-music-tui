@@ -34,8 +34,9 @@ var (
 )
 
 const (
-	frameInterval    = 50 * time.Millisecond
-	playerctlTimeout = 800 * time.Millisecond
+	frameInterval           = 50 * time.Millisecond
+	playerctlTimeout        = 800 * time.Millisecond
+	positionRefreshInterval = 2 * time.Second
 )
 
 var (
@@ -77,6 +78,13 @@ func debugf(format string, args ...interface{}) {
 type controlRequest struct {
 	player string
 	args   []string
+}
+
+type positionRefreshResult struct {
+	expectedTrackKey   string
+	expectedReceivedAt time.Time
+	snapshot           *player.Snapshot
+	err                error
 }
 
 func main() {
@@ -122,7 +130,9 @@ func main() {
 	defer lyricsState.Stop()
 	defer artworkState.Close()
 
-	playerEvents := playerClient.Follow(ctx, *flagPlayer)
+	followContext, cancelFollow := context.WithCancel(ctx)
+	defer func() { cancelFollow() }()
+	playerEvents := playerClient.Follow(followContext, *flagPlayer)
 	inputChan := make(chan byte, 32)
 	go readInput(ctx, os.Stdin, inputChan)
 	controlChan := make(chan controlRequest, 32)
@@ -136,8 +146,39 @@ func main() {
 	var renderedArtworkVersion uint64 = ^uint64(0)
 	previousArtCols, previousArtRows := -1, -1
 	previousHasPlayer := false
+	positionRefreshChan := make(chan positionRefreshResult, 1)
+	positionRefreshRunning := false
+	lastPositionRefresh := time.Time{}
+	positionRefreshTrackKey := ""
 	forceClear := true
 	var lastFrame []byte
+
+	acceptSnapshot := func(snapshot player.Snapshot) {
+		current = snapshot
+		if !hasPlayer {
+			forceClear = true
+		}
+		hasPlayer = true
+		info := current.Info
+		newLyricKey := lyricTrackKey(info)
+		if newLyricKey != lyricKey {
+			lyricKey = newLyricKey
+			artists := append([]string(nil), info.Artists...)
+			if len(artists) == 0 {
+				artists = player.SplitArtistsFallback(info.Artist)
+			}
+			artists = player.FlattenArtists(artists)
+			if *flagNoLyrics {
+				lyricsState.Stop()
+			} else {
+				lyricsState.Start(ctx, lyricsClient, info.Title, artists, info.Artist, info.Album, info.Length)
+			}
+		}
+		if !*flagNoArt && info.ArtUrl != artworkSource {
+			artworkSource = info.ArtUrl
+			artworkState.Request(ctx, info.ArtUrl)
+		}
+	}
 
 	ticker := time.NewTicker(frameInterval)
 	defer ticker.Stop()
@@ -166,30 +207,26 @@ func main() {
 				artworkSource = ""
 			}
 			if event.Snapshot != nil {
-				current = *event.Snapshot
-				if !hasPlayer {
-					forceClear = true
-				}
-				hasPlayer = true
-				info := current.Info
-				newLyricKey := lyricTrackKey(info)
-				if newLyricKey != lyricKey {
-					lyricKey = newLyricKey
-					artists := append([]string(nil), info.Artists...)
-					if len(artists) == 0 {
-						artists = player.SplitArtistsFallback(info.Artist)
-					}
-					artists = player.FlattenArtists(artists)
-					if *flagNoLyrics {
-						lyricsState.Stop()
-					} else {
-						lyricsState.Start(ctx, lyricsClient, info.Title, artists, info.Artist, info.Album, info.Length)
-					}
-				}
-				if !*flagNoArt && info.ArtUrl != artworkSource {
-					artworkSource = info.ArtUrl
-					artworkState.Request(ctx, info.ArtUrl)
-				}
+				acceptSnapshot(*event.Snapshot)
+			}
+
+		case refresh, ok := <-positionRefreshChan:
+			if !ok {
+				positionRefreshChan = nil
+				continue
+			}
+			positionRefreshRunning = false
+			if refresh.err != nil {
+				debugf("playerctl end-of-track refresh: %v", refresh.err)
+			}
+			if refresh.snapshot != nil && hasPlayer && current.TrackKey() == refresh.expectedTrackKey && current.ReceivedAt.Equal(refresh.expectedReceivedAt) {
+				debugf("playerctl position refresh: player=%q position %.2fs -> %.2fs", current.Info.Name, current.PositionAt(time.Now()), refresh.snapshot.PositionAt(time.Now()))
+				acceptSnapshot(*refresh.snapshot)
+				// The old follow process may still have buffered a pre-refresh
+				// record. Replacing it makes the refresh a hard ordering boundary.
+				cancelFollow()
+				followContext, cancelFollow = context.WithCancel(ctx)
+				playerEvents = playerClient.Follow(followContext, *flagPlayer)
 			}
 
 		case key, ok := <-inputChan:
@@ -220,6 +257,41 @@ func main() {
 				forceClear = true
 				previousHasPlayer = hasPlayer
 			}
+			now := time.Now()
+			trackKey := current.TrackKey()
+			if trackKey != positionRefreshTrackKey {
+				positionRefreshTrackKey = trackKey
+				lastPositionRefresh = time.Time{}
+			}
+			if hasPlayer && !positionRefreshRunning && current.AtTrackEnd(now) && (lastPositionRefresh.IsZero() || now.Sub(lastPositionRefresh) >= positionRefreshInterval) {
+				positionRefreshRunning = true
+				lastPositionRefresh = now
+				expectedTrackKey := current.TrackKey()
+				expectedReceivedAt := current.ReceivedAt
+				playerName := current.Info.Name
+				if strings.TrimSpace(playerName) == "" {
+					playerName = *flagPlayer
+					if strings.TrimSpace(playerName) == "" {
+						playerName = "%any"
+					}
+				}
+				go func() {
+					info, refreshErr := playerClient.Metadata(ctx, playerName)
+					result := positionRefreshResult{
+						expectedTrackKey:   expectedTrackKey,
+						expectedReceivedAt: expectedReceivedAt,
+						err:                refreshErr,
+					}
+					if refreshErr == nil {
+						snapshot := player.Snapshot{Info: info, ReceivedAt: time.Now()}
+						result.snapshot = &snapshot
+					}
+					select {
+					case positionRefreshChan <- result:
+					case <-ctx.Done():
+					}
+				}()
+			}
 
 			artSnapshot := artworkState.Snapshot()
 			redrawArtwork := !*flagNoArt && (forceClear || artSnapshot.Version != renderedArtworkVersion)
@@ -228,7 +300,7 @@ func main() {
 			if forceClear {
 				frame.WriteString("\033[2J")
 			}
-			frameErr := buildFrame(&frame, current, hasPlayer, time.Now(), cols, rows, os.Stdout, theme, lyricsSnapshot, artSnapshot, redrawArtwork, frameOptions{
+			frameErr := buildFrame(&frame, current, hasPlayer, now, cols, rows, os.Stdout, theme, lyricsSnapshot, artSnapshot, redrawArtwork, frameOptions{
 				NoInfo: *flagNoInfo, NoLyrics: *flagNoLyrics, NoArt: *flagNoArt,
 				ArtOnly: isArtOnly, LyricsOnly: isLyricsOnly,
 			})

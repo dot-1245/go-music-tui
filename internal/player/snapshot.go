@@ -40,6 +40,21 @@ func (snapshot Snapshot) PositionAt(now time.Time) float64 {
 	return position
 }
 
+// AtTrackEnd reports whether a playing snapshot has reached its known end.
+// Position is not a PropertiesChanged property in MPRIS, so callers can use
+// this as a low-frequency recovery point for players that do not emit a
+// metadata event when repeating the same track.
+func (snapshot Snapshot) AtTrackEnd(now time.Time) bool {
+	if !strings.EqualFold(strings.TrimSpace(snapshot.Info.Status), "playing") {
+		return false
+	}
+	length := snapshot.Info.LengthSeconds
+	if length <= 0 {
+		length = float64(snapshot.Info.Length)
+	}
+	return length > 0 && snapshot.PositionAt(now) >= length
+}
+
 // TrackKey identifies changes that require lyric and artwork work.
 func (snapshot Snapshot) TrackKey() string {
 	info := snapshot.Info

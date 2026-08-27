@@ -110,6 +110,18 @@ func TestSnapshotPositionAt(t *testing.T) {
 	}
 }
 
+func TestSnapshotAtTrackEnd(t *testing.T) {
+	received := time.Now()
+	snapshot := Snapshot{Info: Info{PositionSeconds: 10, LengthSeconds: 10, Status: "Playing"}, ReceivedAt: received}
+	if !snapshot.AtTrackEnd(received) {
+		t.Fatal("playing snapshot at its length was not recognized as track end")
+	}
+	snapshot.Info.Status = "Paused"
+	if snapshot.AtTrackEnd(received) {
+		t.Fatal("paused snapshot was treated as a repeat recovery point")
+	}
+}
+
 func TestActionArgsAndNextLoop(t *testing.T) {
 	args, ok := ActionArgs("volume-up")
 	if !ok || len(args) != 2 || args[0] != "volume" || args[1] != "0.05+" {
