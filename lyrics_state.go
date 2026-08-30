@@ -33,6 +33,12 @@ type lyricsState struct {
 	order    []string
 }
 
+// lyricFetchTimeout bounds one provider round. AMLL may need several
+// sequential search/get requests before it can return word-synchronized
+// lyrics, so the runtime deadline must cover that plan rather than only one
+// HTTP request.
+const lyricFetchTimeout = 5 * time.Second
+
 func newLyricsState() *lyricsState {
 	return &lyricsState{cache: make(map[string][]LyricLine)}
 }
@@ -111,13 +117,13 @@ func (state *lyricsState) finish(requestID uint64) {
 	state.cancel = nil
 }
 
-// NeedsRefresh reports whether a completed lookup may be improved by a later
-// provider response. Word-synchronized lyrics are treated as the terminal
-// quality for the periodic recheck.
+// NeedsRefresh reports whether a completed lookup may be improved or retried
+// later. An empty result is retryable too: a transient provider failure must
+// not permanently suppress the periodic recheck.
 func (state *lyricsState) NeedsRefresh() bool {
 	state.mu.RLock()
 	defer state.mu.RUnlock()
-	return !state.fetching && len(state.lines) > 0 && !lyrics.HasWordSyncedLyrics(state.lines)
+	return !state.fetching && !lyrics.HasWordSyncedLyrics(state.lines)
 }
 
 func (state *lyricsState) fetch(ctx context.Context, client lyricProvider, title string, artists []string, rawArtist, album string, durationSec int, requestID uint64, cacheKey string, preserveOnFailure bool) {
@@ -134,7 +140,7 @@ func (state *lyricsState) fetch(ctx context.Context, client lyricProvider, title
 		targetArtists = appendUniqueArtist(targetArtists, artist)
 	}
 
-	requestCtx, cancel := context.WithTimeout(ctx, 2800*time.Millisecond)
+	requestCtx, cancel := context.WithTimeout(ctx, lyricFetchTimeout)
 	defer cancel()
 	results := make(chan *lyricResult, 3)
 	var providerWaitGroup sync.WaitGroup
@@ -228,6 +234,16 @@ func (state *lyricsState) Stop() {
 	state.fetching = false
 	state.mu.Unlock()
 	state.wg.Wait()
+}
+
+// Reset stops the active lookup, clears visible lyrics, and drops cached
+// results so the next Start always performs a fresh provider lookup.
+func (state *lyricsState) Reset() {
+	state.Stop()
+	state.mu.Lock()
+	state.cache = make(map[string][]LyricLine)
+	state.order = nil
+	state.mu.Unlock()
 }
 
 func lyricCacheKey(title string, artists []string, rawArtist, album string, durationSec int) string {

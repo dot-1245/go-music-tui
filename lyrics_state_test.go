@@ -19,6 +19,10 @@ type upgradingLyricProvider struct {
 	calls int
 }
 
+type delayedEnhancedLyricProvider struct {
+	release chan struct{}
+}
+
 func (provider *upgradingLyricProvider) next() *lyrics.Result {
 	provider.mu.Lock()
 	provider.calls++
@@ -45,6 +49,29 @@ func (provider *upgradingLyricProvider) FetchSyncLRC(context.Context, string, st
 
 func (provider *upgradingLyricProvider) FetchAMLL(context.Context, string, string, []string, string, int) *lyrics.Result {
 	return provider.next()
+}
+
+func (provider *delayedEnhancedLyricProvider) FetchLRCLIB(context.Context, string, []string, string, int) *lyrics.Result {
+	return &lyrics.Result{
+		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
+		Lines: []lyrics.Line{{Time: 0, Text: "ordinary"}}, Quality: 390,
+	}
+}
+
+func (provider *delayedEnhancedLyricProvider) FetchSyncLRC(ctx context.Context, _ string, _ string, _ []string, _ string, _ int) *lyrics.Result {
+	select {
+	case <-provider.release:
+		return &lyrics.Result{
+			Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
+			Lines: []lyrics.Line{{Time: 0, Text: "enhanced", Words: []lyrics.Word{{Time: 0, Text: "enhanced"}}}}, Quality: 600,
+		}
+	case <-ctx.Done():
+		return nil
+	}
+}
+
+func (provider *delayedEnhancedLyricProvider) FetchAMLL(context.Context, string, string, []string, string, int) *lyrics.Result {
+	return nil
 }
 
 func (provider *blockingLyricProvider) wait(ctx context.Context, title string) *lyrics.Result {
@@ -93,8 +120,8 @@ func TestLyricsStateCancelsPreviousTrack(t *testing.T) {
 
 func TestLyricsStateNeedsRefreshForNonWordSyncedLyrics(t *testing.T) {
 	state := newLyricsState()
-	if state.NeedsRefresh() {
-		t.Fatal("empty lyrics were marked for recheck")
+	if !state.NeedsRefresh() {
+		t.Fatal("empty lyrics were not marked for retry")
 	}
 	state.lines = []LyricLine{{Time: 0, Text: "line"}}
 	if !state.NeedsRefresh() {
@@ -110,6 +137,61 @@ func TestLyricsStateNeedsRefreshForNonWordSyncedLyrics(t *testing.T) {
 	state.lines = []LyricLine{{Time: 0, Text: "line"}}
 	if state.NeedsRefresh() {
 		t.Fatal("active lyric fetch was marked for another recheck")
+	}
+}
+
+func TestLyricsStateAppliesEnhancedResultAfterOrdinaryResult(t *testing.T) {
+	provider := &delayedEnhancedLyricProvider{release: make(chan struct{})}
+	state := newLyricsState()
+	defer state.Stop()
+	state.Start(context.Background(), provider, "Track", []string{"Artist"}, "Artist", "Album", 120)
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		lines, _ := state.Snapshot()
+		if len(lines) > 0 && lines[0].Text == "ordinary" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("ordinary provider result did not become visible")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(provider.release)
+
+	deadline = time.Now().Add(time.Second)
+	for {
+		state.mu.RLock()
+		fetching := state.fetching
+		state.mu.RUnlock()
+		if !fetching {
+			lines, _ := state.Snapshot()
+			if !lyrics.HasWordSyncedLyrics(lines) {
+				t.Fatalf("final lyric result was not enhanced: %#v", lines)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("enhanced provider result did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestLyricsStateResetClearsVisibleLyricsAndCache(t *testing.T) {
+	state := newLyricsState()
+	key := lyricCacheKey("Track", []string{"Artist"}, "Artist", "Album", 120)
+	state.lines = []LyricLine{{Time: 0, Text: "line"}}
+	state.cache[key] = cloneLyricLines(state.lines)
+	state.order = []string{key}
+
+	state.Reset()
+	lines, loading := state.Snapshot()
+	if lines != nil || loading {
+		t.Fatalf("Reset snapshot = %#v, loading=%v; want empty and idle", lines, loading)
+	}
+	if len(state.cache) != 0 || len(state.order) != 0 {
+		t.Fatalf("Reset left lyric cache entries: cache=%d order=%d", len(state.cache), len(state.order))
 	}
 }
 

@@ -191,6 +191,27 @@ func main() {
 		}
 	}
 
+	forceRefresh := func() {
+		debugf("manual refresh requested")
+		lyricsState.Reset()
+		artworkState.Reset()
+		lyricKey = ""
+		lastLyricsRecheck = time.Time{}
+		artworkSource = ""
+		renderedArtworkVersion = ^uint64(0)
+		lastFrame = nil
+		forceClear = true
+
+		// Recreate the monitor as well as the rendered state so R can recover
+		// from a stale playerctl stream without restarting the TUI.
+		cancelFollow()
+		followContext, cancelFollow = context.WithCancel(ctx)
+		playerEvents = playerClient.Follow(followContext, *flagPlayer)
+		if hasPlayer {
+			acceptSnapshot(current)
+		}
+	}
+
 	ticker := time.NewTicker(frameInterval)
 	defer ticker.Stop()
 	for {
@@ -247,6 +268,10 @@ func main() {
 			}
 			if key == 27 || key == 3 {
 				return
+			}
+			if isRefreshKey(key) {
+				forceRefresh()
+				continue
 			}
 			if !hasPlayer {
 				continue
@@ -392,6 +417,10 @@ func controlArgs(key byte, info player.Info) ([]string, bool) {
 		return []string{"loop", player.NextLoop(info.Loop)}, true
 	}
 	return args, true
+}
+
+func isRefreshKey(key byte) bool {
+	return key == 'r' || key == 'R'
 }
 
 func enqueueControl(output chan<- controlRequest, request controlRequest) {

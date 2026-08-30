@@ -81,6 +81,20 @@ func (c *Cache) Put(source string, imageValue image.Image) {
 	}
 }
 
+// Clear removes every cached image and releases the cache's references to
+// decoded artwork.
+func (c *Cache) Clear() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.values = make(map[string]image.Image)
+	c.pixelCounts = make(map[string]int64)
+	c.order = nil
+	c.usedPixels = 0
+}
+
 func (c *Cache) promote(source string) {
 	for index, existing := range c.order {
 		if existing == source {

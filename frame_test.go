@@ -63,6 +63,15 @@ func TestControlArgs(t *testing.T) {
 	}
 }
 
+func TestIsRefreshKey(t *testing.T) {
+	if !isRefreshKey('R') || !isRefreshKey('r') {
+		t.Fatal("R/r was not recognized as the refresh key")
+	}
+	if isRefreshKey('a') {
+		t.Fatal("seek key was recognized as the refresh key")
+	}
+}
+
 func TestBuildFramePreservesInternalVolumeStyles(t *testing.T) {
 	received := time.Now()
 	snapshot := player.Snapshot{

@@ -91,9 +91,11 @@ func (state *artworkState) load(ctx context.Context, source string, generation u
 		imageValue, err := state.fetcher.Fetch(attemptCtx, source)
 		cancel()
 		if err == nil {
-			state.cache.Put(source, imageValue)
 			state.mu.Lock()
 			if state.generation == generation && state.source == source {
+				// Keep cache insertion under the state lock so Reset cannot
+				// clear the cache and then have this stale request repopulate it.
+				state.cache.Put(source, imageValue)
 				state.image = imageValue
 				state.err = nil
 				state.loading = false
@@ -125,6 +127,25 @@ func (state *artworkState) load(ctx context.Context, source string, generation u
 			}
 		}
 	}
+}
+
+// Reset clears the current artwork and its cache. An in-flight request is
+// invalidated without waiting for the network operation, so the caller can
+// immediately start a fresh request for the current track.
+func (state *artworkState) Reset() {
+	state.mu.Lock()
+	if state.cancel != nil {
+		state.cancel()
+		state.cancel = nil
+	}
+	state.source = ""
+	state.image = nil
+	state.err = nil
+	state.loading = false
+	state.generation++
+	state.version++
+	state.cache.Clear()
+	state.mu.Unlock()
 }
 
 func waitContext(ctx context.Context, delay time.Duration) bool {

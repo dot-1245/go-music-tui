@@ -47,7 +47,17 @@ them first.
 
 Artist values may use common player separators such as commas, semicolons, or
 `feat.`. Use `--raw-artist` when the provider should receive a specific
-unparsed artist string. `--timeout` bounds the whole command.
+unparsed artist string. SyncLRC is not queried when no artist is supplied, so a
+TUI-equivalent probe should include all available metadata, for example:
+
+```bash
+go run ./debug/lyrics-fetch --title "Shelter" \
+  --artist "Porter Robinson, Madeon" \
+  --raw-artist "Porter Robinson, Madeon" \
+  --album "Shelter" --duration 219 --provider all -v
+```
+
+`--timeout` bounds the whole command.
 
 ### Render lyric formats
 

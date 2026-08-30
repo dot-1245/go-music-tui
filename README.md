@@ -84,6 +84,7 @@ display. `NO_COLOR` disables colors in `auto` mode.
 | `a` / `d` | Seek backward / forward by 5 seconds |
 | `z` | Toggle shuffle |
 | `x` | Cycle loop mode: none → track → playlist → none |
+| `R` / `r` | Reset lyric/artwork/player state and redraw the entire screen |
 | `Esc` / `Ctrl-C` | Quit |
 
 ## Runtime design
