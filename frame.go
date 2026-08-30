@@ -195,9 +195,6 @@ func appendTextFrame(
 		}
 	}
 
-	if !options.NoInfo && rows >= 2 {
-		fmt.Fprintf(buffer, "\033[%d;2H%s[w/s] Vol | [q/e] Prev/Next | [a/d] Seek | [z/x] Shuffle/Loop | [Space] Toggle | [ESC] Quit%s\033[K", rows-1, theme.Gray, theme.Reset)
-	}
 	buffer.WriteString("\033[H")
 	return artErr
 }

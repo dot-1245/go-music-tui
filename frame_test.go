@@ -106,6 +106,16 @@ func TestBuildFrameWipesWrappedTextRows(t *testing.T) {
 	}
 }
 
+func TestBuildFrameOmitsKeyboardFooter(t *testing.T) {
+	var output bytes.Buffer
+	if err := buildFrame(&output, player.Snapshot{Info: player.Info{Title: "title"}}, true, time.Now(), 80, 24, nil, ttycolor.New(ttycolor.ModeNever, nil), nil, artworkSnapshot{}, false, frameOptions{NoArt: true}); err != nil {
+		t.Fatalf("buildFrame returned error: %v", err)
+	}
+	if strings.Contains(output.String(), "[w/s] Vol") {
+		t.Fatal("keyboard footer was still rendered")
+	}
+}
+
 func TestBuildFrameWrapsLyricsInsideTextPanel(t *testing.T) {
 	received := time.Now()
 	snapshot := player.Snapshot{
