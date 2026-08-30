@@ -34,6 +34,7 @@ func buildFrame(
 	redrawArtwork bool,
 	options frameOptions,
 ) error {
+	wipeTextArea(buffer, cols, rows, options)
 	if redrawArtwork && !options.NoArt {
 		buffer.WriteString("\x1b_Ga=d\x1b\\")
 		if artSnapshot.Image != nil && artSnapshot.Source != "" {
@@ -68,16 +69,7 @@ func appendTextFrame(
 
 	info := snapshot.Info
 	position := snapshot.PositionAt(now)
-	offsetX := 40
-	if rows < 25 {
-		offsetX = 32
-	}
-	if options.NoArt {
-		offsetX = 4
-	}
-	if cols > 0 && offsetX >= cols {
-		offsetX = 1
-	}
+	offsetX := textOffset(cols, rows, options)
 
 	drawLine := func(y int, color, icon, label, text string, sanitize bool) {
 		if y < 1 || rows > 0 && y > rows {
@@ -146,16 +138,14 @@ func appendTextFrame(
 			lyricY = 4
 		}
 		currentIndex, nextIndex := lyricsview.CurrentAndNext(lyricsSnapshot, position)
+		maxWidth := lyricTextWidth(cols, offsetX)
+		lastLyricRow := rows - 2
 		if options.LyricsOnly {
 			maxLines := rows - 2
 			if maxLines < 1 {
 				maxLines = 1
 			}
-			if len(lyricsSnapshot) == 0 {
-				for row := 1; row <= maxLines; row++ {
-					fmt.Fprintf(buffer, "\033[%d;%dH\033[K", row, offsetX)
-				}
-			} else {
+			if len(lyricsSnapshot) > 0 {
 				activeIndex := currentIndex
 				if activeIndex < 0 {
 					activeIndex = nextIndex
@@ -166,43 +156,41 @@ func appendTextFrame(
 				start, end := lyricsview.Window(len(lyricsSnapshot), activeIndex, maxLines)
 				row := 1
 				for index := start; index < end; index++ {
-					fmt.Fprintf(buffer, "\033[%d;%dH", row, offsetX)
+					var wrapped []string
 					if index == currentIndex {
-						buffer.WriteString(lyricsview.RenderKaraokeLine(lyricsSnapshot[index], position, theme))
+						wrapped = lyricsview.RenderKaraokeLineWrapped(lyricsSnapshot[index], position, theme, maxWidth)
+						row = writeWrappedLyric(buffer, row, lastLyricRow, offsetX, wrapped, "", "", "")
 					} else {
-						buffer.WriteString(theme.Gray)
-						buffer.WriteString(lyricsview.SafeText(lyricsSnapshot[index].Text))
-						buffer.WriteString(theme.Reset)
+						wrapped = lyricsview.WrapText(lyricsSnapshot[index].Text, maxWidth)
+						row = writeWrappedLyric(buffer, row, lastLyricRow, offsetX, wrapped, "", theme.Gray, theme.Reset)
 					}
-					buffer.WriteString("\033[K")
-					row++
-				}
-				for ; row <= maxLines; row++ {
-					fmt.Fprintf(buffer, "\033[%d;%dH\033[K", row, offsetX)
 				}
 			}
 		} else if len(lyricsSnapshot) == 0 {
-			clearLyricRows(buffer, lyricY, offsetX, rows)
+			// wipeTextArea already cleared the lyric region.
 		} else if currentIndex < 0 {
-			clearLyricRow(buffer, lyricY, offsetX, rows)
+			row := lyricY + 1
 			if nextIndex >= 0 && nextIndex < len(lyricsSnapshot) {
-				fmt.Fprintf(buffer, "\033[%d;%dH%s🎤 %s%s\033[K", lyricY+1, offsetX, theme.Gray, lyricsview.SafeText(lyricsSnapshot[nextIndex].Text), theme.Reset)
-			} else {
-				clearLyricRow(buffer, lyricY+1, offsetX, rows)
+				marker := "🎤 "
+				markerWidth := textCellWidth(marker)
+				wrapped := lyricsview.WrapText(lyricsSnapshot[nextIndex].Text, maxWidth-markerWidth)
+				row = writeWrappedLyric(buffer, row, lastLyricRow, offsetX, wrapped, theme.Gray+marker, "", theme.Reset)
 			}
-			clearLyricRow(buffer, lyricY+2, offsetX, rows)
 		} else {
+			row := lyricY
 			if currentIndex > 0 {
-				fmt.Fprintf(buffer, "\033[%d;%dH%s%s%s\033[K", lyricY, offsetX, theme.Gray, lyricsview.SafeText(lyricsSnapshot[currentIndex-1].Text), theme.Reset)
+				wrapped := lyricsview.WrapText(lyricsSnapshot[currentIndex-1].Text, maxWidth)
+				row = writeWrappedLyric(buffer, row, lastLyricRow, offsetX, wrapped, "", theme.Gray, theme.Reset)
 			} else {
-				clearLyricRow(buffer, lyricY, offsetX, rows)
+				row++
 			}
-			currentText := lyricsview.RenderKaraokeLine(lyricsSnapshot[currentIndex], position, theme)
-			fmt.Fprintf(buffer, "\033[%d;%dH%s🎤 %s%s\033[K", lyricY+1, offsetX, theme.Primary, currentText, theme.Reset)
+			marker := "🎤 "
+			markerWidth := textCellWidth(marker)
+			wrapped := lyricsview.RenderKaraokeLineWrapped(lyricsSnapshot[currentIndex], position, theme, maxWidth-markerWidth)
+			row = writeWrappedLyric(buffer, row, lastLyricRow, offsetX, wrapped, theme.Primary+marker, "", "")
 			if currentIndex+1 < len(lyricsSnapshot) {
-				fmt.Fprintf(buffer, "\033[%d;%dH%s%s%s\033[K", lyricY+2, offsetX, theme.Gray, lyricsview.SafeText(lyricsSnapshot[currentIndex+1].Text), theme.Reset)
-			} else {
-				clearLyricRow(buffer, lyricY+2, offsetX, rows)
+				wrapped = lyricsview.WrapText(lyricsSnapshot[currentIndex+1].Text, maxWidth)
+				row = writeWrappedLyric(buffer, row, lastLyricRow, offsetX, wrapped, "", theme.Gray, theme.Reset)
 			}
 		}
 	}
@@ -214,17 +202,64 @@ func appendTextFrame(
 	return artErr
 }
 
-func clearLyricRows(buffer *bytes.Buffer, first, column, rows int) {
-	clearLyricRow(buffer, first, column, rows)
-	clearLyricRow(buffer, first+1, column, rows)
-	clearLyricRow(buffer, first+2, column, rows)
+func lyricTextWidth(cols, offsetX int) int {
+	// Leave the final terminal column unused. This avoids the terminal's
+	// pending-wrap behavior when a lyric row is followed by EL (\033[K).
+	width := cols - offsetX
+	if width < 1 {
+		return 1
+	}
+	return width
 }
 
-func clearLyricRow(buffer *bytes.Buffer, row, column, rows int) {
-	if row < 1 || row > rows {
+func textCellWidth(value string) int {
+	width := 0
+	for _, character := range value {
+		width += runeCellWidth(character)
+	}
+	return width
+}
+
+func writeWrappedLyric(buffer *bytes.Buffer, row, lastRow, column int, chunks []string, firstPrefix, rowPrefix, reset string) int {
+	for index, chunk := range chunks {
+		if row > lastRow {
+			break
+		}
+		prefix := rowPrefix
+		if index == 0 {
+			prefix += firstPrefix
+		}
+		fmt.Fprintf(buffer, "\033[%d;%dH%s%s%s\033[K", row, column, prefix, chunk, reset)
+		row++
+	}
+	return row
+}
+
+func textOffset(cols, rows int, options frameOptions) int {
+	offsetX := 40
+	if rows < 25 {
+		offsetX = 32
+	}
+	if options.NoArt {
+		offsetX = 4
+	}
+	if cols > 0 && offsetX >= cols {
+		offsetX = 1
+	}
+	return offsetX
+}
+
+// wipeTextArea clears the text panel before drawing a frame. EL only clears
+// the cells from the text column onward, preserving album art on the left;
+// clearing every row also removes continuation rows left by terminal wrapping.
+func wipeTextArea(buffer *bytes.Buffer, cols, rows int, options frameOptions) {
+	if rows < 1 || options.NoInfo && options.NoLyrics {
 		return
 	}
-	fmt.Fprintf(buffer, "\033[%d;%dH\033[K", row, column)
+	offsetX := textOffset(cols, rows, options)
+	for row := 1; row <= rows; row++ {
+		fmt.Fprintf(buffer, "\033[%d;%dH\033[K", row, offsetX)
+	}
 }
 
 func truncateRunes(value string, max int) string {

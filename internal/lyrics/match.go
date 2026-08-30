@@ -310,12 +310,33 @@ func resultDurationDifference(result *Result, targetDuration int) float64 {
 	return math.Abs(result.Duration - float64(targetDuration))
 }
 
+func resultMetadataMatches(result *Result, targetTitle string, targetArtists []string) bool {
+	if result == nil {
+		return false
+	}
+	if result.Title != "" && TitleSimilarity(result.Title, targetTitle) < minTitleSimilarity {
+		return false
+	}
+	if result.Artist != "" && BestSimilarityAgainst(result.Artist, targetArtists) < minArtistSimilarity {
+		return false
+	}
+	return true
+}
+
 // BetterResult reports whether candidate should replace current.
 func BetterResult(candidate, current *Result, targetDuration int, targetTitle string, targetArtists []string, targetAlbum string) bool {
 	if candidate == nil {
 		return false
 	}
 	if current == nil {
+		return true
+	}
+	candidateWordSynced := HasWordSyncedLyrics(candidate.Lines)
+	currentWordSynced := HasWordSyncedLyrics(current.Lines)
+	if currentWordSynced && !candidateWordSynced {
+		return false
+	}
+	if candidateWordSynced && !currentWordSynced && resultMetadataMatches(candidate, targetTitle, targetArtists) {
 		return true
 	}
 	candidateMatch := ResultMatchScore(candidate, targetTitle, targetArtists, targetAlbum)

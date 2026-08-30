@@ -85,3 +85,34 @@ func TestBuildFramePreservesInternalVolumeStyles(t *testing.T) {
 		t.Fatalf("volume bar styles were sanitized: %q", text)
 	}
 }
+
+func TestBuildFrameWipesWrappedTextRows(t *testing.T) {
+	var output bytes.Buffer
+	if err := buildFrame(&output, player.Snapshot{}, false, time.Now(), 80, 24, nil, ttycolor.New(ttycolor.ModeNever, nil), nil, artworkSnapshot{}, false, frameOptions{NoArt: true}); err != nil {
+		t.Fatalf("buildFrame returned error: %v", err)
+	}
+	text := output.String()
+	if !strings.Contains(text, "\033[1;4H\033[K") || !strings.Contains(text, "\033[24;4H\033[K") {
+		t.Fatalf("text area was not wiped from top to bottom: %q", text)
+	}
+}
+
+func TestBuildFrameWrapsLyricsInsideTextPanel(t *testing.T) {
+	received := time.Now()
+	snapshot := player.Snapshot{
+		Info:       player.Info{Status: "Playing", Title: "title", Length: 60},
+		ReceivedAt: received,
+	}
+	lines := []lyrics.Line{{Time: 0, Text: strings.Repeat("x", 100)}}
+	var output bytes.Buffer
+	if err := buildFrame(&output, snapshot, true, received, 80, 24, nil, ttycolor.New(ttycolor.ModeNever, nil), lines, artworkSnapshot{}, false, frameOptions{NoArt: true}); err != nil {
+		t.Fatalf("buildFrame returned error: %v", err)
+	}
+	text := output.String()
+	if !strings.Contains(text, "\033[18;4H") {
+		t.Fatalf("wrapped lyric did not get an explicit second row: %q", text)
+	}
+	if strings.Contains(text, "\033[18;1H") {
+		t.Fatalf("wrapped lyric fell back to terminal column one: %q", text)
+	}
+}

@@ -163,3 +163,29 @@ func TestBetterLyricResultPrefersWordSync(t *testing.T) {
 		t.Fatal("word-synced result did not beat ordinary result")
 	}
 }
+
+func TestBetterLyricResultAcceptsWordSyncWithoutProviderMetadata(t *testing.T) {
+	ordinary := &lyrics.Result{
+		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
+		Lines: []lyrics.Line{{Time: 0, Text: "track"}}, Quality: 390,
+	}
+	karaoke := &lyrics.Result{
+		Lines: []lyrics.Line{{Time: 0, Text: "track", Words: []lyrics.Word{{Time: 0, Text: "track"}}}}, Quality: 600,
+	}
+	if !lyrics.BetterResult(karaoke, ordinary, 120, "Track", []string{"Artist"}, "Album") {
+		t.Fatal("word-synced result without metadata did not beat ordinary result")
+	}
+}
+
+func TestBetterLyricResultDoesNotDowngradeWordSync(t *testing.T) {
+	ordinary := &lyrics.Result{
+		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
+		Lines: []lyrics.Line{{Time: 0, Text: "track"}}, Quality: 390,
+	}
+	karaoke := &lyrics.Result{
+		Lines: []lyrics.Line{{Time: 0, Text: "track", Words: []lyrics.Word{{Time: 0, Text: "track"}}}}, Quality: 600,
+	}
+	if lyrics.BetterResult(ordinary, karaoke, 120, "Track", []string{"Artist"}, "Album") {
+		t.Fatal("ordinary result downgraded an existing word-synced result")
+	}
+}

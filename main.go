@@ -37,6 +37,7 @@ const (
 	frameInterval           = 50 * time.Millisecond
 	playerctlTimeout        = 800 * time.Millisecond
 	positionRefreshInterval = 2 * time.Second
+	lyricsRecheckInterval   = 15 * time.Second
 )
 
 var (
@@ -141,6 +142,7 @@ func main() {
 	var current player.Snapshot
 	hasPlayer := false
 	var lyricKey string
+	lastLyricsRecheck := time.Time{}
 	var artworkSource string
 	var lastFollowError time.Time
 	var renderedArtworkVersion uint64 = ^uint64(0)
@@ -153,6 +155,23 @@ func main() {
 	forceClear := true
 	var lastFrame []byte
 
+	startLyrics := func(info player.Info, refresh bool) {
+		artists := append([]string(nil), info.Artists...)
+		if len(artists) == 0 {
+			artists = player.SplitArtistsFallback(info.Artist)
+		}
+		artists = player.FlattenArtists(artists)
+		if *flagNoLyrics {
+			lyricsState.Stop()
+			return
+		}
+		if refresh {
+			lyricsState.Refresh(ctx, lyricsClient, info.Title, artists, info.Artist, info.Album, info.Length)
+			return
+		}
+		lyricsState.Start(ctx, lyricsClient, info.Title, artists, info.Artist, info.Album, info.Length)
+	}
+
 	acceptSnapshot := func(snapshot player.Snapshot) {
 		current = snapshot
 		if !hasPlayer {
@@ -163,16 +182,8 @@ func main() {
 		newLyricKey := lyricTrackKey(info)
 		if newLyricKey != lyricKey {
 			lyricKey = newLyricKey
-			artists := append([]string(nil), info.Artists...)
-			if len(artists) == 0 {
-				artists = player.SplitArtistsFallback(info.Artist)
-			}
-			artists = player.FlattenArtists(artists)
-			if *flagNoLyrics {
-				lyricsState.Stop()
-			} else {
-				lyricsState.Start(ctx, lyricsClient, info.Title, artists, info.Artist, info.Album, info.Length)
-			}
+			lastLyricsRecheck = time.Now()
+			startLyrics(info, false)
 		}
 		if !*flagNoArt && info.ArtUrl != artworkSource {
 			artworkSource = info.ArtUrl
@@ -204,6 +215,7 @@ func main() {
 				lyricsState.Stop()
 				artworkState.Request(ctx, "")
 				lyricKey = ""
+				lastLyricsRecheck = time.Time{}
 				artworkSource = ""
 			}
 			if event.Snapshot != nil {
@@ -291,6 +303,10 @@ func main() {
 					case <-ctx.Done():
 					}
 				}()
+			}
+			if hasPlayer && !*flagNoLyrics && !lastLyricsRecheck.IsZero() && now.Sub(lastLyricsRecheck) >= lyricsRecheckInterval && lyricsState.NeedsRefresh() {
+				lastLyricsRecheck = now
+				startLyrics(current.Info, true)
 			}
 
 			artSnapshot := artworkState.Snapshot()

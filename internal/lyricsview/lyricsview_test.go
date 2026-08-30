@@ -35,6 +35,35 @@ func TestSafeTextRemovesTerminalControls(t *testing.T) {
 	}
 }
 
+func TestWrapTextUsesTerminalCellWidth(t *testing.T) {
+	if got := WrapText("abcdef", 3); len(got) != 2 || got[0] != "abc" || got[1] != "def" {
+		t.Fatalf("ASCII WrapText = %#v", got)
+	}
+	if got := WrapText("あいう", 4); len(got) != 2 || got[0] != "あい" || got[1] != "う" {
+		t.Fatalf("CJK WrapText = %#v", got)
+	}
+}
+
+func TestRenderKaraokeLineWrappedKeepsRowsIndependent(t *testing.T) {
+	theme := ttycolor.New(ttycolor.ModeAlways, nil)
+	line := lyrics.Line{Words: []lyrics.Word{
+		{Time: 1, Text: "one "},
+		{Time: 2, Text: "two"},
+	}}
+	rows := RenderKaraokeLineWrapped(line, 2.5, theme, 4)
+	if len(rows) != 2 {
+		t.Fatalf("wrapped karaoke rows = %#v; want two rows", rows)
+	}
+	for index, row := range rows {
+		if !strings.HasSuffix(row, theme.Reset) {
+			t.Fatalf("row %d has no style reset: %q", index, row)
+		}
+	}
+	if !strings.Contains(rows[0], "one ") || !strings.Contains(rows[1], "two") {
+		t.Fatalf("wrapped karaoke text was split incorrectly: %#v", rows)
+	}
+}
+
 func TestCurrentAndNextAndWindow(t *testing.T) {
 	lines := []lyrics.Line{{Time: 1}, {Time: 3}, {Time: 5}}
 	current, next := CurrentAndNext(lines, 3.5)
