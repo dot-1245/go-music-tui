@@ -342,6 +342,20 @@ func ResultMetadataMatches(result *Result, targetTitle string, targetArtists []s
 	return true
 }
 
+// isUntrustedEnhancedSource identifies the provider whose fuzzy fallback
+// searches can return a word-synced track with echoed query metadata.
+func isUntrustedEnhancedSource(source string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(source)), "synclrc-")
+}
+
+// IsDeferredResult reports whether a result should wait until the other
+// providers have completed before being displayed. SyncLRC's fuzzy fallback
+// can return a word-synced track with echoed query metadata, so displaying it
+// immediately can cause a brief but visible wrong-lyrics flash.
+func IsDeferredResult(result *Result) bool {
+	return result != nil && isUntrustedEnhancedSource(result.Source)
+}
+
 // BetterResult reports whether candidate should replace current.
 func BetterResult(candidate, current *Result, targetDuration int, targetTitle string, targetArtists []string, targetAlbum string) bool {
 	if candidate == nil {
@@ -352,14 +366,20 @@ func BetterResult(candidate, current *Result, targetDuration int, targetTitle st
 	}
 	candidateWordSynced := HasWordSyncedLyrics(candidate.Lines)
 	currentWordSynced := HasWordSyncedLyrics(current.Lines)
+	candidateMatch := ResultMatchScore(candidate, targetTitle, targetArtists, targetAlbum)
+	currentMatch := ResultMatchScore(current, targetTitle, targetArtists, targetAlbum)
 	if currentWordSynced && !candidateWordSynced {
+		if isUntrustedEnhancedSource(current.Source) && candidateMatch > currentMatch {
+			return true
+		}
 		return false
 	}
 	if candidateWordSynced && !currentWordSynced && ResultMetadataMatches(candidate, targetTitle, targetArtists) {
-		return true
+		if !isUntrustedEnhancedSource(candidate.Source) || candidateMatch >= currentMatch {
+			return true
+		}
+		return false
 	}
-	candidateMatch := ResultMatchScore(candidate, targetTitle, targetArtists, targetAlbum)
-	currentMatch := ResultMatchScore(current, targetTitle, targetArtists, targetAlbum)
 	if candidateMatch > currentMatch+1.2 {
 		return true
 	}

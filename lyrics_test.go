@@ -189,3 +189,20 @@ func TestBetterLyricResultDoesNotDowngradeWordSync(t *testing.T) {
 		t.Fatal("ordinary result downgraded an existing word-synced result")
 	}
 }
+
+func TestBetterLyricResultRejectsWeakerSyncLRCMetadata(t *testing.T) {
+	ordinary := &lyrics.Result{
+		Title: "2", Artist: "Lee Youngji", Album: "Gen", Duration: 160,
+		Lines: []lyrics.Line{{Time: 1, Text: "correct"}}, Source: "lrclib-lyricsfile", Quality: 540,
+	}
+	karaoke := &lyrics.Result{
+		Title: "2", Artist: "Lee Youngji", Duration: 0,
+		Lines: []lyrics.Line{{Time: 1, Text: "wrong", Words: []lyrics.Word{{Time: 1, Text: "wrong"}}}}, Source: "synclrc-enhanced", Quality: 600,
+	}
+	if lyrics.BetterResult(karaoke, ordinary, 160, "2", []string{"星野源", "Lee Youngji"}, "Gen") {
+		t.Fatal("metadata-weaker SyncLRC result replaced the better ordinary result")
+	}
+	if !lyrics.BetterResult(ordinary, karaoke, 160, "2", []string{"星野源", "Lee Youngji"}, "Gen") {
+		t.Fatal("better ordinary result did not replace metadata-weaker SyncLRC result")
+	}
+}

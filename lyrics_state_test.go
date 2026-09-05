@@ -28,6 +28,11 @@ type mismatchedEnhancedLyricProvider struct {
 	wrong bool
 }
 
+type deferredWrongLyricProvider struct {
+	releaseLRCLIB chan struct{}
+	syncReturned  chan struct{}
+}
+
 func (provider *upgradingLyricProvider) next() *lyrics.Result {
 	provider.mu.Lock()
 	provider.calls++
@@ -105,6 +110,30 @@ func (provider *mismatchedEnhancedLyricProvider) FetchSyncLRC(context.Context, s
 
 func (provider *mismatchedEnhancedLyricProvider) FetchAMLL(context.Context, string, string, []string, string, int) *lyrics.Result {
 	return provider.result()
+}
+
+func (provider *deferredWrongLyricProvider) FetchLRCLIB(ctx context.Context, _ string, _ []string, _ string, _ int) *lyrics.Result {
+	select {
+	case <-provider.releaseLRCLIB:
+		return &lyrics.Result{
+			Title: "2", Artist: "Lee Youngji", Album: "Gen", Duration: 160,
+			Lines: []lyrics.Line{{Time: 2, Text: "correct"}}, Source: "lrclib-lyricsfile", Quality: 540,
+		}
+	case <-ctx.Done():
+		return nil
+	}
+}
+
+func (provider *deferredWrongLyricProvider) FetchSyncLRC(context.Context, string, string, []string, string, int) *lyrics.Result {
+	close(provider.syncReturned)
+	return &lyrics.Result{
+		Title: "2", Artist: "Lee Youngji", Duration: 0,
+		Lines: []lyrics.Line{{Time: 2, Text: "wrong", Words: []lyrics.Word{{Time: 2, Text: "wrong"}}}}, Source: "synclrc-enhanced", Quality: 600,
+	}
+}
+
+func (provider *deferredWrongLyricProvider) FetchAMLL(context.Context, string, string, []string, string, int) *lyrics.Result {
+	return nil
 }
 
 func (provider *blockingLyricProvider) wait(ctx context.Context, title string) *lyrics.Result {
@@ -249,6 +278,48 @@ func TestLyricsStateRejectsMismatchedEnhancedResultDuringRefresh(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("refresh did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestLyricsStateDefersUntrustedEnhancedResultUntilOtherProvidersFinish(t *testing.T) {
+	provider := &deferredWrongLyricProvider{
+		releaseLRCLIB: make(chan struct{}),
+		syncReturned:  make(chan struct{}),
+	}
+	state := newLyricsState()
+	defer state.Stop()
+	state.Start(context.Background(), provider, "2", []string{"星野源", "Lee Youngji"}, "星野源, Lee Youngji", "Gen", 160)
+
+	select {
+	case <-provider.syncReturned:
+	case <-time.After(time.Second):
+		t.Fatal("SyncLRC provider did not return")
+	}
+	time.Sleep(10 * time.Millisecond)
+	lines, _ := state.Snapshot()
+	for _, line := range lines {
+		if line.Text == "wrong" {
+			t.Fatalf("untrusted enhanced result was displayed before other providers finished: %#v", lines)
+		}
+	}
+	close(provider.releaseLRCLIB)
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		state.mu.RLock()
+		fetching := state.fetching
+		state.mu.RUnlock()
+		if !fetching {
+			lines, _ := state.Snapshot()
+			if len(lines) != 1 || lines[0].Text != "correct" {
+				t.Fatalf("trusted result was not selected after deferred lookup: %#v", lines)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("deferred lyric lookup did not finish")
 		}
 		time.Sleep(time.Millisecond)
 	}

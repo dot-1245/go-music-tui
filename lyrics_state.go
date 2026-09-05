@@ -191,13 +191,20 @@ func (state *lyricsState) fetch(ctx context.Context, client lyricProvider, title
 			}
 			if result != nil && lyrics.BetterResult(result, best, durationSec, targetTitle, targetArtists, album) {
 				best = result
-				debugf("=> applied provider result: source=%s title=%q artist=%q (reqID=%d)", result.Source, result.Title, result.Artist, requestID)
-				state.apply(result, requestID, cacheKey, preserveOnFailure)
+				if lyrics.IsDeferredResult(result) {
+					debugf("=> deferred provider result: source=%s title=%q artist=%q (reqID=%d)", result.Source, result.Title, result.Artist, requestID)
+				} else {
+					debugf("=> applied provider result: source=%s title=%q artist=%q (reqID=%d)", result.Source, result.Title, result.Artist, requestID)
+					state.apply(result, requestID, cacheKey, preserveOnFailure)
+				}
 			}
 		}
 	}
 	if best == nil {
 		state.apply(nil, requestID, cacheKey, preserveOnFailure)
+	} else if lyrics.IsDeferredResult(best) {
+		debugf("=> applied deferred provider result: source=%s title=%q artist=%q (reqID=%d)", best.Source, best.Title, best.Artist, requestID)
+		state.apply(best, requestID, cacheKey, preserveOnFailure)
 	}
 }
 
