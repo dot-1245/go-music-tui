@@ -31,6 +31,7 @@ type lyricsState struct {
 	wg       sync.WaitGroup
 	cache    map[string][]LyricLine
 	order    []string
+	result   *lyricResult
 }
 
 // lyricFetchTimeout bounds one provider round. AMLL may need several
@@ -71,6 +72,7 @@ func (state *lyricsState) start(parent context.Context, client lyricProvider, ti
 	requestID := state.request
 	if !preserveOnFailure {
 		state.lines = []LyricLine{{Time: 0, Text: "Loading lyrics..."}}
+		state.result = nil
 	}
 	state.loading = true
 	state.fetching = true
@@ -78,6 +80,18 @@ func (state *lyricsState) start(parent context.Context, client lyricProvider, ti
 	if useCache {
 		if cached, ok := state.cache[cacheKey]; ok {
 			state.lines = cloneLyricLines(cached)
+			cachedArtist := strings.Join(artists, ", ")
+			if cachedArtist == "" {
+				cachedArtist = rawArtist
+			}
+			state.result = &lyricResult{
+				Title:    lyrics.CleanTrackTitle(title),
+				Artist:   cachedArtist,
+				Album:    album,
+				Duration: float64(durationSec),
+				Lines:    cloneLyricLines(cached),
+				Source:   "cached",
+			}
 			state.loading = false
 			state.fetching = false
 			state.promoteCacheLocked(cacheKey)
@@ -160,6 +174,12 @@ func (state *lyricsState) fetch(ctx context.Context, client lyricProvider, title
 	}()
 
 	var best *lyricResult
+	var baseline *lyricResult
+	if preserveOnFailure {
+		state.mu.RLock()
+		baseline = cloneLyricResult(state.result)
+		state.mu.RUnlock()
+	}
 	completed := 0
 	targetTitle := lyrics.CleanTrackTitle(title)
 	for completed < 3 {
@@ -182,16 +202,19 @@ func (state *lyricsState) fetch(ctx context.Context, client lyricProvider, title
 					debugf("=> rejected provider result: metadata mismatch source=%s title=%q artist=%q target=%q artists=%v (reqID=%d)", result.Source, result.Title, result.Artist, targetTitle, targetArtists, requestID)
 					result = nil
 				}
-				if preserveOnFailure && result != nil && !lyrics.HasWordSyncedLyrics(result.Lines) {
-					// A periodic refresh is specifically looking for an
-					// enhanced result. Do not replace the visible lyrics with
-					// another ordinary result while looking for one.
-					result = nil
-				}
 			}
-			if result != nil && lyrics.BetterResult(result, best, durationSec, targetTitle, targetArtists, album) {
+			comparison := best
+			if comparison == nil {
+				comparison = baseline
+			}
+			if result != nil && lyrics.BetterResult(result, comparison, durationSec, targetTitle, targetArtists, album) {
 				best = result
-				if lyrics.IsDeferredResult(result) {
+				if preserveOnFailure && !lyrics.HasWordSyncedLyrics(result.Lines) {
+					// A periodic refresh is specifically looking for an
+					// enhanced result. Keep ordinary results as a comparison
+					// baseline without replacing the visible lyrics.
+					debugf("=> held ordinary provider result: source=%s title=%q artist=%q (reqID=%d)", result.Source, result.Title, result.Artist, requestID)
+				} else if lyrics.IsDeferredResult(result) {
 					debugf("=> deferred provider result: source=%s title=%q artist=%q (reqID=%d)", result.Source, result.Title, result.Artist, requestID)
 				} else {
 					debugf("=> applied provider result: source=%s title=%q artist=%q (reqID=%d)", result.Source, result.Title, result.Artist, requestID)
@@ -201,7 +224,11 @@ func (state *lyricsState) fetch(ctx context.Context, client lyricProvider, title
 		}
 	}
 	if best == nil {
-		state.apply(nil, requestID, cacheKey, preserveOnFailure)
+		if !preserveOnFailure {
+			state.apply(nil, requestID, cacheKey, false)
+		}
+	} else if preserveOnFailure && !lyrics.HasWordSyncedLyrics(best.Lines) {
+		debugf("=> kept existing lyrics after refresh (reqID=%d)", requestID)
 	} else if lyrics.IsDeferredResult(best) {
 		debugf("=> applied deferred provider result: source=%s title=%q artist=%q (reqID=%d)", best.Source, best.Title, best.Artist, requestID)
 		state.apply(best, requestID, cacheKey, preserveOnFailure)
@@ -218,10 +245,12 @@ func (state *lyricsState) apply(result *lyricResult, requestID uint64, cacheKey 
 	if result == nil {
 		if !preserveOnFailure {
 			state.lines = nil
+			state.result = nil
 		}
 		return
 	}
 	state.lines = cloneLyricLines(result.Lines)
+	state.result = cloneLyricResult(result)
 	if cacheKey != "" {
 		state.cache[cacheKey] = cloneLyricLines(result.Lines)
 		state.promoteCacheLocked(cacheKey)
@@ -242,6 +271,7 @@ func (state *lyricsState) Stop() {
 	}
 	state.request++
 	state.lines = nil
+	state.result = nil
 	state.loading = false
 	state.fetching = false
 	state.mu.Unlock()
@@ -288,6 +318,15 @@ func cloneLyricLines(lines []LyricLine) []LyricLine {
 		clone[i].Words = append([]LyricWord(nil), line.Words...)
 	}
 	return clone
+}
+
+func cloneLyricResult(result *lyricResult) *lyricResult {
+	if result == nil {
+		return nil
+	}
+	clone := *result
+	clone.Lines = cloneLyricLines(result.Lines)
+	return &clone
 }
 
 func newRuntimeLyricClient() *lyrics.Client {

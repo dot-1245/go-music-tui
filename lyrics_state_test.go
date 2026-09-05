@@ -33,6 +33,8 @@ type deferredWrongLyricProvider struct {
 	syncReturned  chan struct{}
 }
 
+type refreshWrongLyricProvider struct{}
+
 func (provider *upgradingLyricProvider) next() *lyrics.Result {
 	provider.mu.Lock()
 	provider.calls++
@@ -133,6 +135,24 @@ func (provider *deferredWrongLyricProvider) FetchSyncLRC(context.Context, string
 }
 
 func (provider *deferredWrongLyricProvider) FetchAMLL(context.Context, string, string, []string, string, int) *lyrics.Result {
+	return nil
+}
+
+func (refreshWrongLyricProvider) FetchLRCLIB(context.Context, string, []string, string, int) *lyrics.Result {
+	return &lyrics.Result{
+		Title: "2", Artist: "Lee Youngji", Album: "Gen", Duration: 160,
+		Lines: []lyrics.Line{{Time: 2, Text: "correct"}}, Source: "lrclib-lyricsfile", Quality: 540,
+	}
+}
+
+func (refreshWrongLyricProvider) FetchSyncLRC(context.Context, string, string, []string, string, int) *lyrics.Result {
+	return &lyrics.Result{
+		Title: "2", Artist: "Lee Youngji", Duration: 0,
+		Lines: []lyrics.Line{{Time: 2, Text: "wrong", Words: []lyrics.Word{{Time: 2, Text: "wrong"}}}}, Source: "synclrc-enhanced", Quality: 600,
+	}
+}
+
+func (refreshWrongLyricProvider) FetchAMLL(context.Context, string, string, []string, string, int) *lyrics.Result {
 	return nil
 }
 
@@ -320,6 +340,50 @@ func TestLyricsStateDefersUntrustedEnhancedResultUntilOtherProvidersFinish(t *te
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("deferred lyric lookup did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestLyricsStateRefreshKeepsTrustedLyricsAgainstLateUntrustedResult(t *testing.T) {
+	provider := refreshWrongLyricProvider{}
+	state := newLyricsState()
+	defer state.Stop()
+	state.Start(context.Background(), provider, "2", []string{"星野源", "Lee Youngji"}, "星野源, Lee Youngji", "Gen", 160)
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		state.mu.RLock()
+		fetching := state.fetching
+		state.mu.RUnlock()
+		if !fetching {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("initial lyric lookup did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	lines, _ := state.Snapshot()
+	if len(lines) != 1 || lines[0].Text != "correct" {
+		t.Fatalf("initial trusted lyrics were not selected: %#v", lines)
+	}
+
+	state.Refresh(context.Background(), provider, "2", []string{"星野源", "Lee Youngji"}, "星野源, Lee Youngji", "Gen", 160)
+	deadline = time.Now().Add(time.Second)
+	for {
+		state.mu.RLock()
+		fetching := state.fetching
+		state.mu.RUnlock()
+		if !fetching {
+			lines, _ := state.Snapshot()
+			if len(lines) != 1 || lines[0].Text != "correct" {
+				t.Fatalf("refresh replaced trusted lyrics with an untrusted result: %#v", lines)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("refresh did not finish")
 		}
 		time.Sleep(time.Millisecond)
 	}
