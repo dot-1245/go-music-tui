@@ -23,6 +23,11 @@ type delayedEnhancedLyricProvider struct {
 	release chan struct{}
 }
 
+type mismatchedEnhancedLyricProvider struct {
+	mu    sync.Mutex
+	wrong bool
+}
+
 func (provider *upgradingLyricProvider) next() *lyrics.Result {
 	provider.mu.Lock()
 	provider.calls++
@@ -30,11 +35,11 @@ func (provider *upgradingLyricProvider) next() *lyrics.Result {
 	provider.mu.Unlock()
 	result := &lyrics.Result{
 		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
-		Lines: []lyrics.Line{{Time: 0, Text: "hello"}}, Quality: 390,
+		Lines: []lyrics.Line{{Time: 2, Text: "hello"}}, Quality: 390,
 	}
 	if enhanced {
 		result.Quality = 600
-		result.Lines[0].Words = []lyrics.Word{{Time: 0, Text: "hello"}}
+		result.Lines[0].Words = []lyrics.Word{{Time: 2, Text: "hello"}}
 	}
 	return result
 }
@@ -54,7 +59,7 @@ func (provider *upgradingLyricProvider) FetchAMLL(context.Context, string, strin
 func (provider *delayedEnhancedLyricProvider) FetchLRCLIB(context.Context, string, []string, string, int) *lyrics.Result {
 	return &lyrics.Result{
 		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
-		Lines: []lyrics.Line{{Time: 0, Text: "ordinary"}}, Quality: 390,
+		Lines: []lyrics.Line{{Time: 2, Text: "ordinary"}}, Quality: 390,
 	}
 }
 
@@ -63,7 +68,7 @@ func (provider *delayedEnhancedLyricProvider) FetchSyncLRC(ctx context.Context, 
 	case <-provider.release:
 		return &lyrics.Result{
 			Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
-			Lines: []lyrics.Line{{Time: 0, Text: "enhanced", Words: []lyrics.Word{{Time: 0, Text: "enhanced"}}}}, Quality: 600,
+			Lines: []lyrics.Line{{Time: 2, Text: "enhanced", Words: []lyrics.Word{{Time: 2, Text: "enhanced"}}}}, Quality: 600,
 		}
 	case <-ctx.Done():
 		return nil
@@ -72,6 +77,34 @@ func (provider *delayedEnhancedLyricProvider) FetchSyncLRC(ctx context.Context, 
 
 func (provider *delayedEnhancedLyricProvider) FetchAMLL(context.Context, string, string, []string, string, int) *lyrics.Result {
 	return nil
+}
+
+func (provider *mismatchedEnhancedLyricProvider) result() *lyrics.Result {
+	provider.mu.Lock()
+	wrong := provider.wrong
+	provider.mu.Unlock()
+	if wrong {
+		return &lyrics.Result{
+			Title: "Unrelated Song", Artist: "Unrelated Artist", Album: "Other Album", Duration: 120,
+			Lines: []lyrics.Line{{Time: 2, Text: "wrong", Words: []lyrics.Word{{Time: 2, Text: "wrong"}}}}, Quality: 600,
+		}
+	}
+	return &lyrics.Result{
+		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
+		Lines: []lyrics.Line{{Time: 2, Text: "ordinary"}}, Quality: 390,
+	}
+}
+
+func (provider *mismatchedEnhancedLyricProvider) FetchLRCLIB(context.Context, string, []string, string, int) *lyrics.Result {
+	return provider.result()
+}
+
+func (provider *mismatchedEnhancedLyricProvider) FetchSyncLRC(context.Context, string, string, []string, string, int) *lyrics.Result {
+	return provider.result()
+}
+
+func (provider *mismatchedEnhancedLyricProvider) FetchAMLL(context.Context, string, string, []string, string, int) *lyrics.Result {
+	return provider.result()
 }
 
 func (provider *blockingLyricProvider) wait(ctx context.Context, title string) *lyrics.Result {
@@ -173,6 +206,49 @@ func TestLyricsStateAppliesEnhancedResultAfterOrdinaryResult(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("enhanced provider result did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestLyricsStateRejectsMismatchedEnhancedResultDuringRefresh(t *testing.T) {
+	provider := &mismatchedEnhancedLyricProvider{}
+	state := newLyricsState()
+	defer state.Stop()
+	state.Start(context.Background(), provider, "Track", []string{"Artist"}, "Artist", "Album", 120)
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		state.mu.RLock()
+		fetching := state.fetching
+		state.mu.RUnlock()
+		if !fetching {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("initial lyric lookup did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	provider.mu.Lock()
+	provider.wrong = true
+	provider.mu.Unlock()
+
+	state.Refresh(context.Background(), provider, "Track", []string{"Artist"}, "Artist", "Album", 120)
+	deadline = time.Now().Add(time.Second)
+	for {
+		state.mu.RLock()
+		fetching := state.fetching
+		state.mu.RUnlock()
+		if !fetching {
+			lines, _ := state.Snapshot()
+			if len(lines) != 1 || lines[0].Text != "ordinary" || lyrics.HasWordSyncedLyrics(lines) {
+				t.Fatalf("mismatched enhanced result replaced visible lyrics: %#v", lines)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("refresh did not finish")
 		}
 		time.Sleep(time.Millisecond)
 	}

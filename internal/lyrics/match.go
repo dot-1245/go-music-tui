@@ -215,6 +215,22 @@ func PickBestMatch(results []map[string]interface{}, targetDuration int, targetT
 	return best
 }
 
+const singleLineIntroMaxStart = 1.0
+
+// HasUsableLyrics reports whether a provider returned lyrics worth displaying.
+// Some fuzzy karaoke endpoints return only one introductory/title line at
+// time zero for tracks that have no lyrics. Treat that shape as empty without
+// using language-specific heuristics.
+func HasUsableLyrics(lines []Line) bool {
+	if len(lines) == 0 {
+		return false
+	}
+	if len(lines) == 1 && lines[0].Time >= 0 && lines[0].Time <= singleLineIntroMaxStart {
+		return false
+	}
+	return true
+}
+
 // HasWordSyncedLyrics reports whether any line has word-level timing.
 func HasWordSyncedLyrics(lines []Line) bool {
 	for _, line := range lines {
@@ -243,7 +259,7 @@ func ResultFromMap(values map[string]interface{}, source string, quality int) *R
 			}
 		}
 	}
-	if len(lines) == 0 {
+	if !HasUsableLyrics(lines) {
 		return nil
 	}
 	if HasWordSyncedLyrics(lines) && quality < 500 {
@@ -264,7 +280,7 @@ func ResultFromMap(values map[string]interface{}, source string, quality int) *R
 
 // ResultFromFields constructs a result after a provider has already parsed lines.
 func ResultFromFields(values map[string]interface{}, lines []Line, synced, plain, source string, quality int) *Result {
-	if len(lines) == 0 {
+	if !HasUsableLyrics(lines) {
 		return nil
 	}
 	if HasWordSyncedLyrics(lines) && quality < 500 {
@@ -310,7 +326,10 @@ func resultDurationDifference(result *Result, targetDuration int) float64 {
 	return math.Abs(result.Duration - float64(targetDuration))
 }
 
-func resultMetadataMatches(result *Result, targetTitle string, targetArtists []string) bool {
+// ResultMetadataMatches reports whether the metadata that a provider supplied
+// is compatible with the requested track. Empty provider fields are allowed
+// because some sources omit one or more metadata values.
+func ResultMetadataMatches(result *Result, targetTitle string, targetArtists []string) bool {
 	if result == nil {
 		return false
 	}
@@ -336,7 +355,7 @@ func BetterResult(candidate, current *Result, targetDuration int, targetTitle st
 	if currentWordSynced && !candidateWordSynced {
 		return false
 	}
-	if candidateWordSynced && !currentWordSynced && resultMetadataMatches(candidate, targetTitle, targetArtists) {
+	if candidateWordSynced && !currentWordSynced && ResultMetadataMatches(candidate, targetTitle, targetArtists) {
 		return true
 	}
 	candidateMatch := ResultMatchScore(candidate, targetTitle, targetArtists, targetAlbum)

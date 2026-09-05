@@ -59,6 +59,9 @@ go run ./debug/lyrics-fetch --title "Shelter" \
 
 `--timeout` bounds the whole command.
 
+Provider results containing only one line that starts within the first second
+are treated as missing lyrics; this filters common placeholder responses.
+
 ### Render lyric formats
 
 ```bash

@@ -9,7 +9,7 @@ import (
 )
 
 func TestFetchProviderKeepsHTTPExchange(t *testing.T) {
-	body := []byte(`{"track":"Test Track","artist":"Test Artist","duration":120,"type":"karaoke","lyrics":"[00:00.00]<00:00.00>Hello <00:00.50>world"}`)
+	body := []byte(`{"track":"Test Track","artist":"Test Artist","duration":120,"type":"karaoke","lyrics":"[00:00.00]<00:00.00>Hello <00:00.50>world\n[00:02.00]<00:02.00>second line"}`)
 	client := NewClient(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.URL.Path != "/lyrics" {
 			t.Fatalf("unexpected request path: %s", request.URL.Path)
@@ -34,7 +34,7 @@ func TestFetchProviderKeepsHTTPExchange(t *testing.T) {
 }
 
 func TestFetchProviderCanAvoidRetainingBodies(t *testing.T) {
-	body := []byte(`{"track":"Test Track","artist":"Test Artist","lyrics":"[00:00]lyrics"}`)
+	body := []byte(`{"track":"Test Track","artist":"Test Artist","lyrics":"[00:00]lyrics\n[00:02]second line"}`)
 	client := NewClientWithOptions(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)), Header: make(http.Header)}, nil
 	})}, nil, ClientOptions{MaxResponseBytes: 1024, CaptureBody: false})
@@ -74,6 +74,40 @@ func TestPickBestMatchAcceptsMissingDuration(t *testing.T) {
 	}, 120, "Track", []string{"Artist"}, nil)
 	if best == nil {
 		t.Fatal("candidate without duration was rejected")
+	}
+}
+
+func TestSingleLineIntroIsTreatedAsMissingLyrics(t *testing.T) {
+	intro := []Line{{Time: 0.5, Text: "placeholder", Words: []Word{{Time: 0.5, Text: "placeholder"}}}}
+	if HasUsableLyrics(intro) {
+		t.Fatal("single introductory line was treated as usable lyrics")
+	}
+	if result := ResultFromFields(nil, intro, "", "", "test", 600); result != nil {
+		t.Fatalf("single introductory line produced a result: %#v", result)
+	}
+	if result := ResultFromMap(map[string]interface{}{
+		"trackName":    "Track",
+		"artistName":   "Artist",
+		"syncedLyrics": "[00:00.50]placeholder",
+	}, "test", 300); result != nil {
+		t.Fatalf("single introductory LRC line produced a result: %#v", result)
+	}
+}
+
+func TestSingleLineLyricsStartingLaterRemainUsable(t *testing.T) {
+	lines := []Line{{Time: 2, Text: "one legitimate line"}}
+	if !HasUsableLyrics(lines) {
+		t.Fatal("single lyric line starting later was treated as missing")
+	}
+	if result := ResultFromFields(nil, lines, "", "", "test", 600); result == nil {
+		t.Fatal("single lyric line starting later was rejected")
+	}
+}
+
+func TestMultipleLyricsLinesStartingAtZeroRemainUsable(t *testing.T) {
+	lines := []Line{{Time: 0, Text: "first"}, {Time: 1, Text: "second"}}
+	if !HasUsableLyrics(lines) {
+		t.Fatal("multiple lyric lines were treated as missing")
 	}
 }
 

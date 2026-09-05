@@ -128,7 +128,7 @@ func TestSyncLRCResult(t *testing.T) {
 		"artist":   "Test Artist",
 		"duration": float64(12),
 		"type":     "karaoke",
-		"lyrics":   "[00:00.00]<00:00.00>Test <00:00.50>Track",
+		"lyrics":   "[00:00.00]<00:00.00>Test <00:00.50>Track\n[00:02.00]Next line",
 	}
 	result := lyrics.ParseSyncLRCResult(payload)
 	if result == nil {
@@ -137,7 +137,7 @@ func TestSyncLRCResult(t *testing.T) {
 	if result.Source != "synclrc-enhanced" || result.Quality != 600 {
 		t.Fatalf("unexpected result ranking: %#v", result)
 	}
-	if len(result.Lines) != 1 || len(result.Lines[0].Words) != 2 {
+	if len(result.Lines) != 2 || len(result.Lines[0].Words) != 2 {
 		t.Fatalf("unexpected result lines: %#v", result.Lines)
 	}
 }

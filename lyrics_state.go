@@ -161,6 +161,7 @@ func (state *lyricsState) fetch(ctx context.Context, client lyricProvider, title
 
 	var best *lyricResult
 	completed := 0
+	targetTitle := lyrics.CleanTrackTitle(title)
 	for completed < 3 {
 		select {
 		case <-ctx.Done():
@@ -174,7 +175,11 @@ func (state *lyricsState) fetch(ctx context.Context, client lyricProvider, title
 			completed++
 			if result != nil {
 				result.Lines = lyrics.StripLeadingLyricMetadata(result.Lines, title, targetArtists)
-				if len(result.Lines) == 0 {
+				if !lyrics.HasUsableLyrics(result.Lines) {
+					result = nil
+				}
+				if result != nil && !lyrics.ResultMetadataMatches(result, targetTitle, targetArtists) {
+					debugf("=> rejected provider result: metadata mismatch source=%s title=%q artist=%q target=%q artists=%v (reqID=%d)", result.Source, result.Title, result.Artist, targetTitle, targetArtists, requestID)
 					result = nil
 				}
 				if preserveOnFailure && result != nil && !lyrics.HasWordSyncedLyrics(result.Lines) {
@@ -184,7 +189,7 @@ func (state *lyricsState) fetch(ctx context.Context, client lyricProvider, title
 					result = nil
 				}
 			}
-			if result != nil && lyrics.BetterResult(result, best, durationSec, lyrics.CleanTrackTitle(title), targetArtists, album) {
+			if result != nil && lyrics.BetterResult(result, best, durationSec, targetTitle, targetArtists, album) {
 				best = result
 				debugf("=> applied provider result: source=%s title=%q artist=%q (reqID=%d)", result.Source, result.Title, result.Artist, requestID)
 				state.apply(result, requestID, cacheKey, preserveOnFailure)
