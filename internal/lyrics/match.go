@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 var (
@@ -15,8 +16,9 @@ var (
 )
 
 const (
-	minTitleSimilarity  = 0.4
-	minArtistSimilarity = 0.4
+	minTitleSimilarity        = 0.4
+	minArtistSimilarity       = 0.4
+	minLyricContentSimilarity = 0.55
 )
 
 // CleanTrackTitle removes collaboration annotations used by some players.
@@ -241,6 +243,41 @@ func HasWordSyncedLyrics(lines []Line) bool {
 	return false
 }
 
+func normalizedLyricText(lines []Line) []rune {
+	var builder strings.Builder
+	for _, line := range lines {
+		for _, char := range strings.ToLower(line.Text) {
+			if unicode.IsLetter(char) || unicode.IsDigit(char) {
+				builder.WriteRune(char)
+			}
+		}
+	}
+	return []rune(builder.String())
+}
+
+// LyricContentSimilarity returns a normalized similarity score from 0 to 1.
+// It ignores whitespace and punctuation so providers can use different line
+// breaks or timestamp formatting without making otherwise equal lyrics fail.
+func LyricContentSimilarity(left, right []Line) float64 {
+	leftText := normalizedLyricText(left)
+	rightText := normalizedLyricText(right)
+	if len(leftText) == 0 || len(rightText) == 0 {
+		return 0
+	}
+	if string(leftText) == string(rightText) {
+		return 1
+	}
+	maxLength := len(leftText)
+	if len(rightText) > maxLength {
+		maxLength = len(rightText)
+	}
+	return 1 - float64(levenshtein(leftText, rightText))/float64(maxLength)
+}
+
+func lyricContentMatches(left, right []Line) bool {
+	return LyricContentSimilarity(left, right) >= minLyricContentSimilarity
+}
+
 // ResultFromMap converts an LRCLIB-style JSON object into the common model.
 func ResultFromMap(values map[string]interface{}, source string, quality int) *Result {
 	if values == nil {
@@ -369,12 +406,17 @@ func BetterResult(candidate, current *Result, targetDuration int, targetTitle st
 	candidateMatch := ResultMatchScore(candidate, targetTitle, targetArtists, targetAlbum)
 	currentMatch := ResultMatchScore(current, targetTitle, targetArtists, targetAlbum)
 	if currentWordSynced && !candidateWordSynced {
-		if isUntrustedEnhancedSource(current.Source) && candidateMatch > currentMatch {
+		if isUntrustedEnhancedSource(current.Source) &&
+			ResultMetadataMatches(candidate, targetTitle, targetArtists) &&
+			(!lyricContentMatches(candidate.Lines, current.Lines) || candidateMatch > currentMatch) {
 			return true
 		}
 		return false
 	}
 	if candidateWordSynced && !currentWordSynced && ResultMetadataMatches(candidate, targetTitle, targetArtists) {
+		if !lyricContentMatches(candidate.Lines, current.Lines) {
+			return false
+		}
 		if !isUntrustedEnhancedSource(candidate.Source) || candidateMatch >= currentMatch {
 			return true
 		}

@@ -66,7 +66,7 @@ func (provider *upgradingLyricProvider) FetchAMLL(context.Context, string, strin
 func (provider *delayedEnhancedLyricProvider) FetchLRCLIB(context.Context, string, []string, string, int) *lyrics.Result {
 	return &lyrics.Result{
 		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
-		Lines: []lyrics.Line{{Time: 2, Text: "ordinary"}}, Quality: 390,
+		Lines: []lyrics.Line{{Time: 2, Text: "hello, world"}}, Quality: 390,
 	}
 }
 
@@ -75,7 +75,7 @@ func (provider *delayedEnhancedLyricProvider) FetchSyncLRC(ctx context.Context, 
 	case <-provider.release:
 		return &lyrics.Result{
 			Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
-			Lines: []lyrics.Line{{Time: 2, Text: "enhanced", Words: []lyrics.Word{{Time: 2, Text: "enhanced"}}}}, Quality: 600,
+			Lines: []lyrics.Line{{Time: 2, Text: "hello world", Words: []lyrics.Word{{Time: 2, Text: "hello"}, {Time: 2.5, Text: "world"}}}}, Quality: 600,
 		}
 	case <-ctx.Done():
 		return nil
@@ -231,7 +231,7 @@ func TestLyricsStateAppliesEnhancedResultAfterOrdinaryResult(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for {
 		lines, _ := state.Snapshot()
-		if len(lines) > 0 && lines[0].Text == "ordinary" {
+		if len(lines) > 0 && lines[0].Text == "hello, world" {
 			break
 		}
 		if time.Now().After(deadline) {

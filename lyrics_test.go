@@ -206,3 +206,45 @@ func TestBetterLyricResultRejectsWeakerSyncLRCMetadata(t *testing.T) {
 		t.Fatal("better ordinary result did not replace metadata-weaker SyncLRC result")
 	}
 }
+
+func TestBetterLyricResultRequiresContentAgreementForKaraoke(t *testing.T) {
+	ordinary := &lyrics.Result{
+		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
+		Lines: []lyrics.Line{
+			{Time: 1, Text: "Hello, this is the correct lyric."},
+			{Time: 4, Text: "The words continue here."},
+		}, Source: "lrclib-lyricsfile", Quality: 540,
+	}
+	matchingKaraoke := &lyrics.Result{
+		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
+		Lines: []lyrics.Line{
+			{Time: 1, Text: "Hello this is the correct lyric", Words: []lyrics.Word{{Time: 1, Text: "Hello this is the correct lyric"}}},
+			{Time: 4, Text: "The words continue here", Words: []lyrics.Word{{Time: 4, Text: "The words continue here"}}},
+		}, Source: "synclrc-enhanced", Quality: 600,
+	}
+	wrongKaraoke := &lyrics.Result{
+		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
+		Lines: []lyrics.Line{
+			{Time: 1, Text: "A completely different song starts here", Words: []lyrics.Word{{Time: 1, Text: "A completely different song starts here"}}},
+			{Time: 4, Text: "Nothing matches the requested lyrics", Words: []lyrics.Word{{Time: 4, Text: "Nothing matches the requested lyrics"}}},
+		}, Source: "synclrc-enhanced", Quality: 600,
+	}
+
+	if !lyrics.BetterResult(matchingKaraoke, ordinary, 120, "Track", []string{"Artist"}, "Album") {
+		t.Fatal("content-matching karaoke result was rejected")
+	}
+	if lyrics.BetterResult(wrongKaraoke, ordinary, 120, "Track", []string{"Artist"}, "Album") {
+		t.Fatal("content-mismatched karaoke result was accepted")
+	}
+	if !lyrics.BetterResult(ordinary, wrongKaraoke, 120, "Track", []string{"Artist"}, "Album") {
+		t.Fatal("ordinary result did not replace content-mismatched karaoke")
+	}
+}
+
+func TestLyricContentSimilarityIgnoresFormatting(t *testing.T) {
+	left := []lyrics.Line{{Text: "Hello, world!"}, {Text: "続きです。"}}
+	right := []lyrics.Line{{Text: "Hello world"}, {Text: "続きです"}}
+	if similarity := lyrics.LyricContentSimilarity(left, right); similarity != 1 {
+		t.Fatalf("formatted-equivalent lyrics similarity = %v, want 1", similarity)
+	}
+}
