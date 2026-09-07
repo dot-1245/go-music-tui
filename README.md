@@ -68,7 +68,7 @@ The main program accepts these flags:
 | `--color=auto` | Enable colors only when stdout is a suitable terminal (default) |
 | `--color=always` | Force ANSI colors |
 | `--color=never` | Disable ANSI colors |
-| `--player NAME` | Follow one named player instead of the default `%any` selector |
+| `--player NAME` | Select the initial player instead of choosing one automatically |
 | `--debug` | Append lyric/artwork/player diagnostics to `~/.cache/go-music-tui-debug.log` |
 
 `--noinfo --nolyrics --noart` is rejected because it would leave nothing to
@@ -84,6 +84,7 @@ display. `NO_COLOR` disables colors in `auto` mode.
 | `a` / `d` | Seek backward / forward by 5 seconds |
 | `z` | Toggle shuffle |
 | `x` | Cycle loop mode: none → track → playlist → none |
+| `F` / `f` | Cycle through the available MPRIS players |
 | `R` / `r` | Reset lyric/artwork/player state and redraw the entire screen |
 | `Esc` / `Ctrl-C` | Quit |
 
@@ -110,9 +111,10 @@ requests are cancellable when the track changes, and completed frames are
 written only when their contents changed. This keeps keyboard input and
 karaoke timing independent of network or image-decoding latency.
 
-When no player is specified, `playerctl` uses `%any` and follows the most
-recently updated player. Use `--player NAME` when several players are active
-and a fixed source is required.
+When no player is specified, the TUI chooses a currently playing player (or
+the first available player) and pins the follow stream to that name. Press
+`F`/`f` to switch to the next available MPRIS player. `--player NAME` selects
+the initial player explicitly; it can still be changed interactively.
 
 ## Terminal colors
 

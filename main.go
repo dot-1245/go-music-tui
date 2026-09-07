@@ -131,9 +131,20 @@ func main() {
 	defer lyricsState.Stop()
 	defer artworkState.Close()
 
+	selectedPlayer, _, selectionErr := playerClient.Select(ctx, *flagPlayer)
+	if selectionErr != nil {
+		debugf("initial player selection failed: %v", selectionErr)
+		selectedPlayer = strings.TrimSpace(*flagPlayer)
+	}
+	debugf("initial player selected: %q", selectedPlayer)
 	followContext, cancelFollow := context.WithCancel(ctx)
 	defer func() { cancelFollow() }()
-	playerEvents := playerClient.Follow(followContext, *flagPlayer)
+	playerEvents := playerClient.Follow(followContext, selectedPlayer)
+	restartFollow := func(selector string) {
+		cancelFollow()
+		followContext, cancelFollow = context.WithCancel(ctx)
+		playerEvents = playerClient.Follow(followContext, selector)
+	}
 	inputChan := make(chan byte, 32)
 	go readInput(ctx, os.Stdin, inputChan)
 	controlChan := make(chan controlRequest, 32)
@@ -179,6 +190,9 @@ func main() {
 		}
 		hasPlayer = true
 		info := current.Info
+		if selectedPlayer == "" && strings.TrimSpace(info.Name) != "" {
+			selectedPlayer = strings.TrimSpace(info.Name)
+		}
 		newLyricKey := lyricTrackKey(info)
 		if newLyricKey != lyricKey {
 			lyricKey = newLyricKey
@@ -189,6 +203,47 @@ func main() {
 			artworkSource = info.ArtUrl
 			artworkState.Request(ctx, info.ArtUrl)
 		}
+	}
+
+	switchPlayer := func(playerName string) {
+		playerName = strings.TrimSpace(playerName)
+		if playerName == "" || playerName == selectedPlayer {
+			return
+		}
+		debugf("switching player: %q -> %q", selectedPlayer, playerName)
+		selectedPlayer = playerName
+		lyricsState.Reset()
+		artworkState.Reset()
+		current = player.Snapshot{}
+		hasPlayer = false
+		lyricKey = ""
+		lastLyricsRecheck = time.Time{}
+		artworkSource = ""
+		positionRefreshRunning = false
+		lastPositionRefresh = time.Time{}
+		positionRefreshTrackKey = ""
+		renderedArtworkVersion = ^uint64(0)
+		lastFrame = nil
+		forceClear = true
+		restartFollow(selectedPlayer)
+	}
+
+	cyclePlayer := func() {
+		players, err := playerClient.List(ctx)
+		if err != nil {
+			debugf("player cycle list failed: %v", err)
+			return
+		}
+		currentPlayer := selectedPlayer
+		if currentPlayer == "" && hasPlayer {
+			currentPlayer = current.Info.Name
+		}
+		nextPlayer := player.NextPlayer(players, currentPlayer)
+		if nextPlayer == "" {
+			debugf("player cycle found no players")
+			return
+		}
+		switchPlayer(nextPlayer)
 	}
 
 	forceRefresh := func() {
@@ -204,9 +259,7 @@ func main() {
 
 		// Recreate the monitor as well as the rendered state so R can recover
 		// from a stale playerctl stream without restarting the TUI.
-		cancelFollow()
-		followContext, cancelFollow = context.WithCancel(ctx)
-		playerEvents = playerClient.Follow(followContext, *flagPlayer)
+		restartFollow(selectedPlayer)
 		if hasPlayer {
 			acceptSnapshot(current)
 		}
@@ -240,7 +293,14 @@ func main() {
 				artworkSource = ""
 			}
 			if event.Snapshot != nil {
+				wasUnselected := selectedPlayer == ""
 				acceptSnapshot(*event.Snapshot)
+				if wasUnselected && selectedPlayer != "" {
+					// If no player existed during startup, %any is only a
+					// bootstrap selector. Pin the first usable result so a
+					// second MPRIS player cannot take over later.
+					restartFollow(selectedPlayer)
+				}
 			}
 
 		case refresh, ok := <-positionRefreshChan:
@@ -257,9 +317,7 @@ func main() {
 				acceptSnapshot(*refresh.snapshot)
 				// The old follow process may still have buffered a pre-refresh
 				// record. Replacing it makes the refresh a hard ordering boundary.
-				cancelFollow()
-				followContext, cancelFollow = context.WithCancel(ctx)
-				playerEvents = playerClient.Follow(followContext, *flagPlayer)
+				restartFollow(selectedPlayer)
 			}
 
 		case key, ok := <-inputChan:
@@ -271,6 +329,10 @@ func main() {
 			}
 			if isRefreshKey(key) {
 				forceRefresh()
+				continue
+			}
+			if isPlayerCycleKey(key) {
+				cyclePlayer()
 				continue
 			}
 			if !hasPlayer {
@@ -421,6 +483,10 @@ func controlArgs(key byte, info player.Info) ([]string, bool) {
 
 func isRefreshKey(key byte) bool {
 	return key == 'r' || key == 'R'
+}
+
+func isPlayerCycleKey(key byte) bool {
+	return key == 'f' || key == 'F'
 }
 
 func enqueueControl(output chan<- controlRequest, request controlRequest) {

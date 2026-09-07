@@ -58,8 +58,8 @@ func (c *Client) List(ctx context.Context) ([]string, error) {
 }
 
 // Select chooses a preferred player, otherwise preferring a currently playing
-// player over the first available name. It is intended for one-shot commands;
-// the TUI uses Follow's %any event stream instead of repeatedly selecting.
+// player over the first available name. A caller that needs a stable stream
+// should pass the returned name to Follow instead of continuing to use %any.
 func (c *Client) Select(ctx context.Context, preferred string) (string, []string, error) {
 	preferred = strings.TrimSpace(preferred)
 	if preferred != "" {
@@ -79,6 +79,36 @@ func (c *Client) Select(ctx context.Context, preferred string) (string, []string
 		}
 	}
 	return players[0], players, nil
+}
+
+// NextPlayer returns the next distinct player after current, wrapping around
+// to the first player. If current is not in the list, the first player is
+// returned. Empty names are ignored so a transient playerctl record cannot
+// create an unusable selector.
+func NextPlayer(players []string, current string) string {
+	current = strings.TrimSpace(current)
+	unique := make([]string, 0, len(players))
+	seen := make(map[string]struct{}, len(players))
+	for _, playerName := range players {
+		playerName = strings.TrimSpace(playerName)
+		if playerName == "" {
+			continue
+		}
+		if _, exists := seen[playerName]; exists {
+			continue
+		}
+		seen[playerName] = struct{}{}
+		unique = append(unique, playerName)
+	}
+	if len(unique) == 0 {
+		return ""
+	}
+	for index, playerName := range unique {
+		if playerName == current {
+			return unique[(index+1)%len(unique)]
+		}
+	}
+	return unique[0]
 }
 
 // Artists returns xesam:artist values as individual lines when the player
