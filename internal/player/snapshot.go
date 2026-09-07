@@ -1,6 +1,7 @@
 package player
 
 import (
+	"math"
 	"strings"
 	"time"
 )
@@ -10,6 +11,53 @@ import (
 type Snapshot struct {
 	Info       Info
 	ReceivedAt time.Time
+}
+
+const positionBackstepTolerance = 2.0
+
+// ReconcileSnapshot removes small backward position jumps caused by a
+// playerctl event being delivered after the position it contains was sampled.
+// Those jumps are especially visible when a word or line boundary is crossed:
+// the local clock reaches the boundary, then a stale event moves it back and
+// the renderer appears to wait for the same boundary again. Large backward
+// jumps remain intact so explicit seeks and same-track repeats still work.
+func ReconcileSnapshot(previous, next Snapshot, now time.Time) Snapshot {
+	if !sameTrack(previous.Info, next.Info) || !isPlaying(previous.Info) || !isPlaying(next.Info) {
+		return next
+	}
+	if previous.AtTrackEnd(now) {
+		// A repeated track can keep the same metadata while its position jumps
+		// from the end back to zero. Do not smooth that legitimate reset.
+		return next
+	}
+
+	previousPosition := previous.PositionAt(now)
+	nextPosition := next.PositionAt(now)
+	backstep := previousPosition - nextPosition
+	if backstep <= 0 || backstep > positionBackstepTolerance {
+		return next
+	}
+
+	next.Info.PositionSeconds = previousPosition
+	if previousPosition >= float64(math.MaxInt) {
+		next.Info.Position = math.MaxInt
+	} else {
+		next.Info.Position = int(previousPosition)
+	}
+	next.ReceivedAt = now
+	return next
+}
+
+func isPlaying(info Info) bool {
+	return strings.EqualFold(strings.TrimSpace(info.Status), "playing")
+}
+
+func sameTrack(left, right Info) bool {
+	if left.Title == "" && left.Artist == "" && left.Album == "" && right.Title == "" && right.Artist == "" && right.Album == "" {
+		return false
+	}
+	return left.Title == right.Title && left.Artist == right.Artist && left.Album == right.Album &&
+		(left.LengthSeconds == 0 || right.LengthSeconds == 0 || left.LengthSeconds == right.LengthSeconds)
 }
 
 // PositionAt returns the best current estimate of the playback position.

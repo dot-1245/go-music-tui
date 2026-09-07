@@ -69,6 +69,7 @@ func (c *Client) follow(ctx context.Context, playerName string, events chan<- Fo
 		}
 		sendFollowEvent(ctx, events, FollowEvent{Started: true})
 
+		var previousSnapshot *Snapshot
 		reader := bufio.NewReaderSize(stdout, 64*1024)
 		for {
 			record, readErr := reader.ReadString(metadataRecordSeparator[0])
@@ -81,6 +82,10 @@ func (c *Client) follow(ctx context.Context, playerName string, events chan<- Fo
 						sendFollowEvent(ctx, events, FollowEvent{Err: parseErr})
 					} else {
 						snapshot := Snapshot{Info: info, ReceivedAt: time.Now()}
+						if previousSnapshot != nil {
+							snapshot = ReconcileSnapshot(*previousSnapshot, snapshot, snapshot.ReceivedAt)
+						}
+						previousSnapshot = &snapshot
 						sendFollowEvent(ctx, events, FollowEvent{Snapshot: &snapshot})
 					}
 				}
