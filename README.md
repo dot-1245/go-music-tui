@@ -41,6 +41,14 @@ implementation.
 go install github.com/dot-1245/go-music-tui@latest
 ```
 
+To try the v0.4 release candidate explicitly:
+
+```bash
+go install github.com/dot-1245/go-music-tui@v0.4.0-rc.1
+```
+
+Prereleases are not selected by `@latest` when a stable release is available.
+
 ### Build from source
 
 ```bash
@@ -107,9 +115,19 @@ player.Follow → local position interpolation → frame buffer
 The renderer does not start `playerctl` on every frame. A single
 `playerctl --follow` process waits for MPRIS changes, while the current
 position is interpolated locally between notifications. Lyrics and artwork
-requests are cancellable when the track changes, and completed frames are
-written only when their contents changed. This keeps keyboard input and
-karaoke timing independent of network or image-decoding latency.
+requests are cancellable when the track changes. Text output replaces only
+changed rows and clears unused continuation rows, avoiding a full text-panel
+wipe before each update. Artwork encoding and terminal writes still run on
+the rendering path and can delay updates.
+
+The renderer checks playback every 50ms. Position recovery requests run in
+the background at the estimated track end, at most once every two seconds.
+Regular mid-track clock synchronization and word-boundary scheduling are not
+implemented yet.
+
+SyncLRC results wait for provider lookups to complete and require a compatible
+LRCLIB result (or retained ordinary lyrics during refresh). Content matching
+ignores punctuation and whitespace and tolerates different line breaks.
 
 When no player is specified, the TUI chooses a currently playing player (or
 the first available player) and pins the follow stream to that name. Press
@@ -121,11 +139,19 @@ the initial player explicitly; it can still be changed interactively.
 Colors use the terminal's normal ANSI 16-color slots rather than RGB values
 from matugen or a generated file. This lets Kitty, foot, Alacritty, tmux, and
 other terminals provide the actual palette. The semantic roles are primary,
-accent, secondary text, and gray text; the current karaoke word is additionally
-shown in bold.
+accent, secondary text, and gray text. Body text and sung lyrics use the
+terminal's default foreground (SGR 39); the current karaoke word is shown in
+bold, while upcoming words and surrounding lines use gray.
+
+Explicit line end times hide lyrics during gaps. In the normal view, gaps of
+up to 250ms retain the preceding lyric without bold emphasis; longer gaps
+hide it in both normal and lyrics-only views. Ordinary
+LRC without explicit ends uses the next line's start as the current line end.
+Playback corrections exceeding 50ms follow the player clock.
 
 Use `--color=never` when redirecting output or when escape sequences are not
-desired. `go run ./debug/tty-color` prints the exact mode and palette decision.
+desired. `go run ./debug/tty-color` prints the mode, palette decision, a karaoke
+sample, and comparisons of the default foreground and ANSI 16 colors.
 
 ## Debug tools
 
@@ -153,6 +179,13 @@ copying production logic, so manual checks and the main TUI stay in sync.
   terminals without Kitty graphics when `--noart` is used.
 - Lyrics depend on third-party services and may be unavailable, rate-limited,
   or incomplete for a track.
+- Providers can return a different collaboration or version with similar
+  lyrics, even when their response metadata matches the requested track.
+  Introductory-credit validation and a lyrics blacklist are not implemented.
+- Karaoke timing can drift or jump when player notifications are delayed.
+  The v0.4 release candidate includes experimental timing and rendering changes;
+  it does not yet implement periodic mid-track position correction. Lyric
+  timestamps themselves may also differ from the playing recording.
 - Local lyric files and custom lyric API selection remain future work; the
   parsers are already exercised by `debug/lyrics-render`.
 

@@ -23,6 +23,10 @@ go run ./debug/tty-color --mode=never
 The command reports whether stdout is a TTY, the `TERM`/`NO_COLOR` inputs, and
 the resulting semantic ANSI palette. `always` overrides `NO_COLOR`; `auto`
 disables colors for non-TTY, `dumb`, or `NO_COLOR` environments.
+The output includes a karaoke sample, normal/bold comparisons for SGR 39
+(default foreground), 37 and 97, and all 16 ANSI palette slots when colors
+are enabled. Lyrics use the default foreground, with the current word in
+bold; upcoming words use gray.
 
 ## Lyrics
 
