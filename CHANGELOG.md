@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.4.0
+
+Stable release of the v0.4 changes listed below, with periodic MPRIS clock
+synchronization replacing the event-only playback monitor.
+
+- Keep one persistent DBus connection and read playback properties every second,
+  including while paused; no playerctl subprocess is needed for each update.
+- Interpolate position with the MPRIS playback Rate and a monotonic clock.
+- Handle Seeked, status, Rate, track and owner-change signals immediately;
+  invalidate stale in-flight replies after transport changes.
+- Recover missing mid-track seek/repeat notifications through periodic queries.
+- Fall back to an explicit Position read when GetAll omits it, and reconnect
+  after a player or session bus disconnects.
+- Add reproducible clock competitions, recording/replay probes, timer comparisons
+  and frame benchmarks under `debug/sync-clock` and the shared internal packages.
+- Add private-DBus integration tests for polling, seek, pause, stale responses,
+  owner recovery and cancellation.
+
+The fixed one-second acquisition policy survived all configured non-regression
+gates in both simulated competition splits. This is not a guarantee of exact
+audio alignment: cached player positions, terminal output and lyric timestamps
+remain sources of error. The renderer retains its 50ms cadence; word-boundary
+scheduling, introductory-credit validation and lyric blacklists remain future work.
+
 ## v0.4.0-rc.1
 
 This prerelease collects changes since v0.3.0. Karaoke synchronization remains

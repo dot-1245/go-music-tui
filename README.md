@@ -4,7 +4,7 @@
 # go-music-tui
 
 A terminal music viewer with live lyrics, karaoke timing, and Kitty album art.
-It reads playback state from MPRIS through `playerctl` and keeps the UI
+It reads playback state directly from MPRIS over DBus and keeps the UI
 responsive while network-backed features load in the background.
 
 > [!NOTE]
@@ -41,13 +41,11 @@ implementation.
 go install github.com/dot-1245/go-music-tui@latest
 ```
 
-To try the v0.4 release candidate explicitly:
+To install the v0.4 stable release explicitly:
 
 ```bash
-go install github.com/dot-1245/go-music-tui@v0.4.0-rc.1
+go install github.com/dot-1245/go-music-tui@v0.4.0
 ```
-
-Prereleases are not selected by `@latest` when a stable release is available.
 
 ### Build from source
 
@@ -98,39 +96,45 @@ display. `NO_COLOR` disables colors in `auto` mode.
 
 ## Runtime design
 
-Playback monitoring is event-driven:
+Playback monitoring combines MPRIS signals with periodic position queries:
 
 ```text
 MPRIS player
-    │ DBus events
+    │ DBus signals + property queries every second
     ▼
-one long-lived playerctl --follow process
-    │ framed metadata records
+one persistent DBus connection
+    │ receipt-time position anchors + playback Rate
     ▼
-player.Follow → local position interpolation → frame buffer
+player.WatchMPRIS → local position interpolation → frame buffer
                                       ├─ lyricsState → lyric providers
                                       └─ artworkState → cache → Kitty
 ```
 
-The renderer does not start `playerctl` on every frame. A single
-`playerctl --follow` process waits for MPRIS changes, while the current
-position is interpolated locally between notifications. Lyrics and artwork
+The renderer does not start `playerctl` on every frame. A persistent DBus
+connection reads player properties every second, including while paused, and
+listens for track, status, Rate and Seeked signals. Position is interpolated
+locally using the reported playback Rate and a monotonic clock. Queries run
+outside the rendering loop with an 800ms deadline; transport changes invalidate
+older in-flight replies. Explicit Position reads cover players that omit it
+from GetAll. `playerctl` remains responsible for discovery and playback controls.
+Lyrics and artwork
 requests are cancellable when the track changes. Text output replaces only
 changed rows and clears unused continuation rows, avoiding a full text-panel
 wipe before each update. Artwork encoding and terminal writes still run on
 the rendering path and can delay updates.
 
-The renderer checks playback every 50ms. Position recovery requests run in
-the background at the estimated track end, at most once every two seconds.
-Regular mid-track clock synchronization and word-boundary scheduling are not
-implemented yet.
+The renderer updates every 50ms. Periodic queries correct mid-track drift and
+recover missing seek/repeat notifications without waiting for the estimated
+track end. Word-boundary scheduling is available as an experiment, not used by
+the production renderer. The MPRIS-only clock comparison and its limitations
+are documented in [`debug/sync-clock/COMPETITION.md`](debug/sync-clock/COMPETITION.md).
 
 SyncLRC results wait for provider lookups to complete and require a compatible
 LRCLIB result (or retained ordinary lyrics during refresh). Content matching
 ignores punctuation and whitespace and tolerates different line breaks.
 
 When no player is specified, the TUI chooses a currently playing player (or
-the first available player) and pins the follow stream to that name. Press
+the first available player) and pins monitoring to that name. Press
 `F`/`f` to switch to the next available MPRIS player. `--player NAME` selects
 the initial player explicitly; it can still be changed interactively.
 
@@ -147,7 +151,7 @@ Explicit line end times hide lyrics during gaps. In the normal view, gaps of
 up to 250ms retain the preceding lyric without bold emphasis; longer gaps
 hide it in both normal and lyrics-only views. Ordinary
 LRC without explicit ends uses the next line's start as the current line end.
-Playback corrections exceeding 50ms follow the player clock.
+Position query results are accepted immediately, including backward corrections.
 
 Use `--color=never` when redirecting output or when escape sequences are not
 desired. `go run ./debug/tty-color` prints the mode, palette decision, a karaoke
@@ -169,6 +173,16 @@ go vet ./...
 go build ./...
 ```
 
+The opt-in integration test launches an isolated `dbus-daemon`, without changing
+your real player's playback:
+
+```bash
+MUSIC_TUI_DBUS_INTEGRATION=1 go test -race -count=1 ./internal/player -run TestWatchMPRISPrivateBus -v
+```
+
+It requires `dbus-daemon` and permission to create a local Unix socket; otherwise
+it is skipped. It covers polling, pause, seek, stale replies, reconnect and shutdown.
+
 Keep reusable parsing, fetching, ranking, rendering, and player-boundary code
 under `internal/`. Debug programs should call those packages instead of
 copying production logic, so manual checks and the main TUI stay in sync.
@@ -182,10 +196,9 @@ copying production logic, so manual checks and the main TUI stay in sync.
 - Providers can return a different collaboration or version with similar
   lyrics, even when their response metadata matches the requested track.
   Introductory-credit validation and a lyrics blacklist are not implemented.
-- Karaoke timing can drift or jump when player notifications are delayed.
-  The v0.4 release candidate includes experimental timing and rendering changes;
-  it does not yet implement periodic mid-track position correction. Lyric
-  timestamps themselves may also differ from the playing recording.
+- Karaoke timing can still drift or jump when a player returns cached or coarse
+  MPRIS positions. Periodic correction cannot establish exact audio alignment;
+  terminal output latency and lyric timestamps can also differ from the recording.
 - Local lyric files and custom lyric API selection remain future work; the
   parsers are already exercised by `debug/lyrics-render`.
 
