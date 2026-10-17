@@ -12,6 +12,35 @@ import (
 	"github.com/dot-1245/go-music-tui/internal/ttycolor"
 )
 
+func TestChangedFrameRowsUpdatesWithoutPreclear(t *testing.T) {
+	frame := []byte("\x1b[1;4H\x1b[K\x1b[2;4H\x1b[K\x1b[1;4Hnew\x1b[K\x1b[H")
+	output, rows := changedFrameRows(frame, map[string]string{"1;4": "old", "2;4": "wrapped"})
+	if strings.Contains(string(output), "\x1b[1;4H\x1b[K") || !strings.Contains(string(output), "\x1b[1;4Hnew\x1b[K") || !strings.Contains(string(output), "\x1b[2;4H\x1b[K") {
+		t.Fatalf("incorrect update or stale-row cleanup: %q", output)
+	}
+	if repeated, _ := changedFrameRows(frame, rows); len(repeated) != 0 {
+		t.Fatalf("unchanged rows redrawn: %q", repeated)
+	}
+}
+
+func TestFrameHoldsOnlyBriefLyricGap(t *testing.T) {
+	lines := []lyrics.Line{{Time: 1, EndTime: 2, Text: "previous lyric"}, {Time: 3, EndTime: 4, Text: "next lyric"}}
+	for _, test := range []struct {
+		position float64
+		visible  bool
+	}{{2.1, true}, {2.5, false}} {
+		var output bytes.Buffer
+		snapshot := player.Snapshot{Info: player.Info{Status: "Paused", PositionSeconds: test.position}}
+		appendTextFrame(&output, snapshot, true, time.Now(), 80, 24, ttycolor.New(ttycolor.ModeAlways, nil), lines, frameOptions{NoInfo: true, NoArt: true}, nil)
+		if got := strings.Contains(output.String(), "previous lyric"); got != test.visible {
+			t.Fatalf("position %.1f: visible=%t; want %t", test.position, got, test.visible)
+		}
+		if strings.Contains(output.String(), "\x1b[1m") {
+			t.Fatalf("inactive line remains bold: %q", output.String())
+		}
+	}
+}
+
 func TestBuildFrameInterpolatesPositionAndSanitizesText(t *testing.T) {
 	received := time.Now()
 	snapshot := player.Snapshot{
@@ -133,5 +162,27 @@ func TestBuildFrameWrapsLyricsInsideTextPanel(t *testing.T) {
 	}
 	if strings.Contains(text, "\033[18;1H") {
 		t.Fatalf("wrapped lyric fell back to terminal column one: %q", text)
+	}
+}
+
+func TestBuildFrameHidesLyricsDuringEndTimeGap(t *testing.T) {
+	received := time.Now()
+	snapshot := player.Snapshot{
+		Info:       player.Info{Status: "Playing", Title: "title", Length: 60, PositionSeconds: 3},
+		ReceivedAt: received,
+	}
+	lines := []lyrics.Line{
+		{Time: 1, EndTime: 2, Text: "first lyric"},
+		{Time: 4, EndTime: 5, Text: "second lyric"},
+	}
+	for _, options := range []frameOptions{{NoArt: true}, {NoArt: true, LyricsOnly: true}} {
+		var output bytes.Buffer
+		if err := buildFrame(&output, snapshot, true, received, 80, 24, nil, ttycolor.New(ttycolor.ModeNever, nil), lines, artworkSnapshot{}, false, options); err != nil {
+			t.Fatalf("buildFrame returned error: %v", err)
+		}
+		text := output.String()
+		if strings.Contains(text, "first lyric") || strings.Contains(text, "second lyric") {
+			t.Fatalf("lyrics were rendered during an EndTime gap (options=%+v): %q", options, text)
+		}
 	}
 }

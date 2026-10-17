@@ -16,7 +16,7 @@ func TestRenderKaraokeLine(t *testing.T) {
 		{Time: 3, Text: "three"},
 	}}
 	output := RenderKaraokeLine(line, 2.5, theme)
-	if !strings.Contains(output, theme.Accent+"one ") || !strings.Contains(output, theme.Bold+theme.Primary+"two "+theme.BoldOff) || !strings.Contains(output, theme.Gray+"three") {
+	if !strings.Contains(output, theme.Text+"one ") || !strings.Contains(output, theme.Bold+theme.Text+"two "+theme.BoldOff) || !strings.Contains(output, theme.Gray+"three") {
 		t.Fatalf("unexpected karaoke colors: %q", output)
 	}
 	if !strings.HasSuffix(output, theme.Reset) {
@@ -24,7 +24,7 @@ func TestRenderKaraokeLine(t *testing.T) {
 	}
 
 	plainOutput := RenderKaraokeLine(lyrics.Line{Text: "ordinary LRC"}, 2.5, theme)
-	if !strings.Contains(plainOutput, theme.Bold+theme.Primary+"ordinary LRC"+theme.BoldOff) {
+	if !strings.Contains(plainOutput, theme.Bold+theme.Text+"ordinary LRC"+theme.BoldOff) {
 		t.Fatalf("ordinary current line is not bold: %q", plainOutput)
 	}
 }
@@ -73,5 +73,29 @@ func TestCurrentAndNextAndWindow(t *testing.T) {
 	start, end := Window(len(lines), current, 2)
 	if start != 0 || end != 2 {
 		t.Fatalf("Window = %d, %d; want 0, 2", start, end)
+	}
+}
+
+func TestCurrentAndNextHonorsEndTimeGaps(t *testing.T) {
+	lines := []lyrics.Line{
+		{Time: 1, EndTime: 2, Text: "first"},
+		{Time: 4, EndTime: 5, Text: "second"},
+	}
+	tests := []struct {
+		position    float64
+		wantCurrent int
+		wantNext    int
+	}{
+		{position: 0, wantCurrent: -1, wantNext: 0},
+		{position: 1.5, wantCurrent: 0, wantNext: 1},
+		{position: 2, wantCurrent: -1, wantNext: 1},
+		{position: 4.5, wantCurrent: 1, wantNext: -1},
+		{position: 5, wantCurrent: -1, wantNext: -1},
+	}
+	for _, test := range tests {
+		current, next := CurrentAndNext(lines, test.position)
+		if current != test.wantCurrent || next != test.wantNext {
+			t.Errorf("CurrentAndNext(%.1f) = %d, %d; want %d, %d", test.position, current, next, test.wantCurrent, test.wantNext)
+		}
 	}
 }

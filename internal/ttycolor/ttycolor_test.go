@@ -57,6 +57,7 @@ func TestEnabled(t *testing.T) {
 func TestNewTheme(t *testing.T) {
 	colored := New(ModeAlways, nil)
 	want := Theme{
+		Text:    "\x1b[39m",
 		Primary: "\x1b[31m",
 		Accent:  "\x1b[32m",
 		SubText: "\x1b[33m",

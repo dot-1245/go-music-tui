@@ -29,13 +29,28 @@ func main() {
 	fmt.Printf("colors enabled: %t\n\n", theme.Enabled())
 
 	fmt.Println("semantic palette:")
-	printSample("Primary", theme.Primary, theme.Reset, "title / current line")
-	printSample("Accent", theme.Accent, theme.Reset, "status / progress / sung words")
+	printSample("Text", theme.Text, theme.Reset, "body text / sung words")
+	printSample("Primary", theme.Primary, theme.Reset, "title icon")
+	printSample("Accent", theme.Accent, theme.Reset, "status icons / progress")
 	printSample("SubText", theme.SubText, theme.Reset, "artist")
 	printSample("Gray", theme.Gray, theme.Reset, "secondary text / upcoming words")
 
 	fmt.Println("\nkaraoke sample:")
-	fmt.Printf("%s歌い終わった %s%s歌っている%s %sこれから%s\n", theme.Accent, theme.Bold, theme.Primary, theme.BoldOff, theme.Gray, theme.Reset)
+	fmt.Printf("%s歌い終わった %s%s歌っている%s %sこれから%s\n", theme.Text, theme.Bold, theme.Text, theme.BoldOff, theme.Gray, theme.Reset)
+	if theme.Enabled() {
+		fmt.Println("\nforeground comparison (normal / bold):")
+		for _, code := range []int{39, 37, 97} {
+			fmt.Printf("SGR %d: \x1b[%dm通常の歌詞 %s太字の歌詞%s\n", code, code, theme.Bold, theme.Reset)
+		}
+		fmt.Println("\nANSI 16 palette (normal / bold):")
+		for index := 0; index < 16; index++ {
+			code := 30 + index
+			if index >= 8 {
+				code = 90 + index - 8
+			}
+			fmt.Printf("color%-2d SGR %d: \x1b[%dmSample %sSample%s\n", index, code, code, theme.Bold, theme.Reset)
+		}
+	}
 
 	if !theme.Enabled() {
 		fmt.Println("\nANSI colors are disabled; the text above is intentionally plain.")

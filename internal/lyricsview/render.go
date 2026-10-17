@@ -47,7 +47,7 @@ type styledSegment struct {
 
 func karaokeSegments(line lyrics.Line, position float64, theme ttycolor.Theme) []styledSegment {
 	if len(line.Words) == 0 {
-		return []styledSegment{{prefix: theme.Bold + theme.Primary, text: SafeText(line.Text), suffix: theme.BoldOff}}
+		return []styledSegment{{prefix: theme.Bold + theme.Text, text: SafeText(line.Text), suffix: theme.BoldOff}}
 	}
 
 	currentWord := -1
@@ -64,10 +64,10 @@ func karaokeSegments(line lyrics.Line, position float64, theme ttycolor.Theme) [
 		prefix := color
 		suffix := ""
 		if i < currentWord {
-			color = theme.Accent
+			color = theme.Text
 			prefix = color
 		} else if i == currentWord {
-			color = theme.Primary
+			color = theme.Text
 			prefix = theme.Bold + color
 			suffix = theme.BoldOff
 		}

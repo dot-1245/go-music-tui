@@ -164,7 +164,7 @@ func main() {
 	lastPositionRefresh := time.Time{}
 	positionRefreshTrackKey := ""
 	forceClear := true
-	var lastFrame []byte
+	var previousTextRows map[string]string
 
 	startLyrics := func(info player.Info, refresh bool) {
 		artists := append([]string(nil), info.Artists...)
@@ -223,7 +223,7 @@ func main() {
 		lastPositionRefresh = time.Time{}
 		positionRefreshTrackKey = ""
 		renderedArtworkVersion = ^uint64(0)
-		lastFrame = nil
+		previousTextRows = nil
 		forceClear = true
 		restartFollow(selectedPlayer)
 	}
@@ -254,7 +254,7 @@ func main() {
 		lastLyricsRecheck = time.Time{}
 		artworkSource = ""
 		renderedArtworkVersion = ^uint64(0)
-		lastFrame = nil
+		previousTextRows = nil
 		forceClear = true
 
 		// Recreate the monitor as well as the rendered state so R can recover
@@ -407,17 +407,21 @@ func main() {
 				NoInfo: *flagNoInfo, NoLyrics: *flagNoLyrics, NoArt: *flagNoArt,
 				ArtOnly: isArtOnly, LyricsOnly: isLyricsOnly,
 			})
-			if !bytes.Equal(frame.Bytes(), lastFrame) {
-				written, writeErr := os.Stdout.Write(frame.Bytes())
-				if writeErr == nil && written != frame.Len() {
+			if forceClear {
+				previousTextRows = nil
+			}
+			output, textRows := changedFrameRows(frame.Bytes(), previousTextRows)
+			if len(output) > 0 {
+				written, writeErr := os.Stdout.Write(output)
+				if writeErr == nil && written != len(output) {
 					writeErr = io.ErrShortWrite
 				}
 				if writeErr != nil {
 					debugf("frame write failed: %v", writeErr)
 					return
 				}
-				lastFrame = append(lastFrame[:0], frame.Bytes()...)
 			}
+			previousTextRows = textRows
 			if frameErr != nil {
 				debugf("frame artwork failed: %v", frameErr)
 			}

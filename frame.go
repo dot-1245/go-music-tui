@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -13,6 +14,39 @@ import (
 	"github.com/dot-1245/go-music-tui/internal/player"
 	"github.com/dot-1245/go-music-tui/internal/ttycolor"
 )
+
+var frameRowPattern = regexp.MustCompile(`(?s)\x1b\[([0-9]+);([0-9]+)H(.*?)\x1b\[K`)
+
+// changedFrameRows keeps the final contents of each row, including empty
+// rows that remove old wrapped lyrics. Intermediate wipes are never emitted.
+func changedFrameRows(frame []byte, previous map[string]string) ([]byte, map[string]string) {
+	matches := frameRowPattern.FindAllSubmatchIndex(frame, -1)
+	rows := make(map[string]string, len(matches))
+	last := make(map[string]int, len(matches))
+	for i, match := range matches {
+		key := string(frame[match[2]:match[3]]) + ";" + string(frame[match[4]:match[5]])
+		rows[key] = string(frame[match[6]:match[7]])
+		last[key] = i
+	}
+	var output bytes.Buffer
+	cursor := 0
+	for i, match := range matches {
+		output.Write(frame[cursor:match[0]])
+		key := string(frame[match[2]:match[3]]) + ";" + string(frame[match[4]:match[5]])
+		if last[key] == i {
+			old, exists := previous[key]
+			if !exists || old != rows[key] {
+				output.Write(frame[match[0]:match[1]])
+			}
+		}
+		cursor = match[1]
+	}
+	output.Write(frame[cursor:])
+	if bytes.Equal(output.Bytes(), []byte("\x1b[H")) {
+		return nil, rows
+	}
+	return output.Bytes(), rows
+}
 
 type frameOptions struct {
 	NoInfo, NoLyrics, NoArt bool
@@ -34,6 +68,7 @@ func buildFrame(
 	redrawArtwork bool,
 	options frameOptions,
 ) error {
+	started := time.Now()
 	wipeTextArea(buffer, cols, rows, options)
 	if redrawArtwork && !options.NoArt {
 		buffer.WriteString("\x1b_Ga=d\x1b\\")
@@ -44,11 +79,11 @@ func buildFrame(
 			if err := artwork.Render(buffer, artSnapshot.Image, placement.Width); err != nil {
 				// Keep rendering the text frame even if the terminal graphics
 				// encoder rejects one image.
-				return appendTextFrame(buffer, snapshot, hasPlayer, now, cols, rows, theme, lyricsSnapshot, options, err)
+				return appendTextFrame(buffer, snapshot, hasPlayer, now.Add(time.Since(started)), cols, rows, theme, lyricsSnapshot, options, err)
 			}
 		}
 	}
-	return appendTextFrame(buffer, snapshot, hasPlayer, now, cols, rows, theme, lyricsSnapshot, options, nil)
+	return appendTextFrame(buffer, snapshot, hasPlayer, now.Add(time.Since(started)), cols, rows, theme, lyricsSnapshot, options, nil)
 }
 
 func appendTextFrame(
@@ -84,7 +119,7 @@ func appendTextFrame(
 				text = ""
 			}
 		}
-		fmt.Fprintf(buffer, "\033[%d;%dH%s%s %s%-8s: %s%s\033[K", y, offsetX, color, icon, theme.Gray, label, theme.Reset, text)
+		fmt.Fprintf(buffer, "\033[%d;%dH%s%s %s%-8s: %s%s%s\033[K", y, offsetX, color, icon, theme.Gray, label, theme.Text, text, theme.Reset)
 	}
 	draw := func(y int, color, icon, label, text string) {
 		drawLine(y, color, icon, label, text, true)
@@ -138,6 +173,15 @@ func appendTextFrame(
 			lyricY = 4
 		}
 		currentIndex, nextIndex := lyricsview.CurrentAndNext(lyricsSnapshot, position)
+		heldLine := false
+		if currentIndex < 0 && nextIndex > 0 {
+			previous := lyricsSnapshot[nextIndex-1]
+			if previous.EndTime > previous.Time && position >= previous.EndTime && position-previous.EndTime <= 0.25 {
+				currentIndex = nextIndex - 1
+				heldLine = true
+			}
+		}
+		beforeFirstLyric := len(lyricsSnapshot) > 0 && currentIndex < 0 && nextIndex == 0 && position < lyricsSnapshot[0].Time
 		maxWidth := lyricTextWidth(cols, offsetX)
 		lastLyricRow := rows - 2
 		if options.LyricsOnly {
@@ -147,22 +191,21 @@ func appendTextFrame(
 			}
 			if len(lyricsSnapshot) > 0 {
 				activeIndex := currentIndex
-				if activeIndex < 0 {
+				if activeIndex < 0 && beforeFirstLyric {
 					activeIndex = nextIndex
 				}
-				if activeIndex < 0 {
-					activeIndex = 0
-				}
-				start, end := lyricsview.Window(len(lyricsSnapshot), activeIndex, maxLines)
-				row := 1
-				for index := start; index < end; index++ {
-					var wrapped []string
-					if index == currentIndex {
-						wrapped = lyricsview.RenderKaraokeLineWrapped(lyricsSnapshot[index], position, theme, maxWidth)
-						row = writeWrappedLyric(buffer, row, lastLyricRow, offsetX, wrapped, "", "", "")
-					} else {
-						wrapped = lyricsview.WrapText(lyricsSnapshot[index].Text, maxWidth)
-						row = writeWrappedLyric(buffer, row, lastLyricRow, offsetX, wrapped, "", theme.Gray, theme.Reset)
+				if activeIndex >= 0 {
+					start, end := lyricsview.Window(len(lyricsSnapshot), activeIndex, maxLines)
+					row := 1
+					for index := start; index < end; index++ {
+						var wrapped []string
+						if index == currentIndex && !heldLine {
+							wrapped = lyricsview.RenderKaraokeLineWrapped(lyricsSnapshot[index], position, theme, maxWidth)
+							row = writeWrappedLyric(buffer, row, lastLyricRow, offsetX, wrapped, "", "", "")
+						} else {
+							wrapped = lyricsview.WrapText(lyricsSnapshot[index].Text, maxWidth)
+							row = writeWrappedLyric(buffer, row, lastLyricRow, offsetX, wrapped, "", theme.Gray, theme.Reset)
+						}
 					}
 				}
 			}
@@ -170,7 +213,7 @@ func appendTextFrame(
 			// wipeTextArea already cleared the lyric region.
 		} else if currentIndex < 0 {
 			row := lyricY + 1
-			if nextIndex >= 0 && nextIndex < len(lyricsSnapshot) {
+			if beforeFirstLyric && nextIndex >= 0 && nextIndex < len(lyricsSnapshot) {
 				marker := "🎤 "
 				markerWidth := textCellWidth(marker)
 				wrapped := lyricsview.WrapText(lyricsSnapshot[nextIndex].Text, maxWidth-markerWidth)
@@ -187,7 +230,13 @@ func appendTextFrame(
 			marker := "🎤 "
 			markerWidth := textCellWidth(marker)
 			wrapped := lyricsview.RenderKaraokeLineWrapped(lyricsSnapshot[currentIndex], position, theme, maxWidth-markerWidth)
-			row = writeWrappedLyric(buffer, row, lastLyricRow, offsetX, wrapped, theme.Primary+marker, "", "")
+			if heldLine {
+				wrapped = lyricsview.WrapText(lyricsSnapshot[currentIndex].Text, maxWidth-markerWidth)
+				for i := range wrapped {
+					wrapped[i] = theme.Gray + wrapped[i] + theme.Reset
+				}
+			}
+			row = writeWrappedLyric(buffer, row, lastLyricRow, offsetX, wrapped, theme.Text+marker, "", "")
 			if currentIndex+1 < len(lyricsSnapshot) {
 				wrapped = lyricsview.WrapText(lyricsSnapshot[currentIndex+1].Text, maxWidth)
 				row = writeWrappedLyric(buffer, row, lastLyricRow, offsetX, wrapped, "", theme.Gray, theme.Reset)

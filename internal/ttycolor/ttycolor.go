@@ -62,6 +62,7 @@ func Enabled(mode Mode, isTTY bool, termName string, noColor bool) bool {
 // Theme contains semantic foreground styles used by the main UI and the
 // karaoke renderer. Empty fields intentionally mean "emit no ANSI code".
 type Theme struct {
+	Text                           string
 	Primary, Accent, SubText, Gray string
 	Bold, BoldOff, Reset           string
 }
@@ -76,6 +77,7 @@ func New(mode Mode, output *os.File) Theme {
 	}
 
 	return Theme{
+		Text: "\x1b[39m", // terminal default foreground, independent of accent slots
 		// Use the normal ANSI slots intentionally. Generated Kitty palettes may
 		// assign the bright slots (91-97) to dark container colors.
 		Primary: "\x1b[31m", // terminal color1 / primary
