@@ -13,14 +13,15 @@ type Snapshot struct {
 	ReceivedAt time.Time
 }
 
-const positionBackstepTolerance = 2.0
+const positionBackstepTolerance = 0.05
 
 // ReconcileSnapshot removes small backward position jumps caused by a
 // playerctl event being delivered after the position it contains was sampled.
 // Those jumps are especially visible when a word or line boundary is crossed:
 // the local clock reaches the boundary, then a stale event moves it back and
-// the renderer appears to wait for the same boundary again. Large backward
-// jumps remain intact so explicit seeks and same-track repeats still work.
+// the renderer appears to wait for the same boundary again. Only jitter within
+// one frame (50ms) is suppressed; larger corrections, seeks and repeats pass
+// through so an extrapolated clock cannot stay substantially ahead.
 func ReconcileSnapshot(previous, next Snapshot, now time.Time) Snapshot {
 	if !sameTrack(previous.Info, next.Info) || !isPlaying(previous.Info) || !isPlaying(next.Info) {
 		return next
