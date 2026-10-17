@@ -35,6 +35,8 @@ type deferredWrongLyricProvider struct {
 
 type refreshWrongLyricProvider struct{}
 
+type karaokeOnlyLyricProvider struct{}
+
 func (provider *upgradingLyricProvider) next() *lyrics.Result {
 	provider.mu.Lock()
 	provider.calls++
@@ -66,7 +68,7 @@ func (provider *upgradingLyricProvider) FetchAMLL(context.Context, string, strin
 func (provider *delayedEnhancedLyricProvider) FetchLRCLIB(context.Context, string, []string, string, int) *lyrics.Result {
 	return &lyrics.Result{
 		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
-		Lines: []lyrics.Line{{Time: 2, Text: "hello, world"}}, Quality: 390,
+		Lines: []lyrics.Line{{Time: 2, Text: "hello, world"}}, Source: "lrclib-lyricsfile", Quality: 390,
 	}
 }
 
@@ -75,7 +77,7 @@ func (provider *delayedEnhancedLyricProvider) FetchSyncLRC(ctx context.Context, 
 	case <-provider.release:
 		return &lyrics.Result{
 			Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
-			Lines: []lyrics.Line{{Time: 2, Text: "hello world", Words: []lyrics.Word{{Time: 2, Text: "hello"}, {Time: 2.5, Text: "world"}}}}, Quality: 600,
+			Lines: []lyrics.Line{{Time: 2, Text: "hello world", Words: []lyrics.Word{{Time: 2, Text: "hello"}, {Time: 2.5, Text: "world"}}}}, Source: "synclrc-enhanced", Quality: 600,
 		}
 	case <-ctx.Done():
 		return nil
@@ -153,6 +155,21 @@ func (refreshWrongLyricProvider) FetchSyncLRC(context.Context, string, string, [
 }
 
 func (refreshWrongLyricProvider) FetchAMLL(context.Context, string, string, []string, string, int) *lyrics.Result {
+	return nil
+}
+
+func (karaokeOnlyLyricProvider) FetchLRCLIB(context.Context, string, []string, string, int) *lyrics.Result {
+	return nil
+}
+
+func (karaokeOnlyLyricProvider) FetchSyncLRC(context.Context, string, string, []string, string, int) *lyrics.Result {
+	return &lyrics.Result{
+		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
+		Lines: []lyrics.Line{{Time: 2, Text: "placeholder", Words: []lyrics.Word{{Time: 2, Text: "placeholder"}}}}, Source: "synclrc-enhanced", Quality: 600,
+	}
+}
+
+func (karaokeOnlyLyricProvider) FetchAMLL(context.Context, string, string, []string, string, int) *lyrics.Result {
 	return nil
 }
 
@@ -340,6 +357,30 @@ func TestLyricsStateDefersUntrustedEnhancedResultUntilOtherProvidersFinish(t *te
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("deferred lyric lookup did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestLyricsStateRejectsKaraokeWithoutLRCLIBBackbone(t *testing.T) {
+	state := newLyricsState()
+	defer state.Stop()
+	state.Start(context.Background(), karaokeOnlyLyricProvider{}, "Track", []string{"Artist"}, "Artist", "Album", 120)
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		state.mu.RLock()
+		fetching := state.fetching
+		state.mu.RUnlock()
+		if !fetching {
+			lines, _ := state.Snapshot()
+			if len(lines) != 0 {
+				t.Fatalf("Karaoke without an LRCLIB backbone was displayed: %#v", lines)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Karaoke-only lyric lookup did not finish")
 		}
 		time.Sleep(time.Millisecond)
 	}

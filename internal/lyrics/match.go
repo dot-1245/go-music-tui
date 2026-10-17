@@ -16,9 +16,13 @@ var (
 )
 
 const (
-	minTitleSimilarity        = 0.4
-	minArtistSimilarity       = 0.4
-	minLyricContentSimilarity = 0.55
+	minTitleSimilarity          = 0.4
+	minArtistSimilarity         = 0.4
+	minLyricContentSimilarity   = 0.55
+	minLyricShorterCoverage     = 0.68
+	minLyricLongerCoverage      = 0.55
+	minLyricLineBoundaryMatch   = 0.25
+	lyricBoundaryMatchTolerance = 0.12
 )
 
 // CleanTrackTitle removes collaboration annotations used by some players.
@@ -243,39 +247,155 @@ func HasWordSyncedLyrics(lines []Line) bool {
 	return false
 }
 
-func normalizedLyricText(lines []Line) []rune {
-	var builder strings.Builder
-	for _, line := range lines {
-		for _, char := range strings.ToLower(line.Text) {
-			if unicode.IsLetter(char) || unicode.IsDigit(char) {
-				builder.WriteRune(char)
-			}
+func normalizedLyricLine(text string) []rune {
+	result := make([]rune, 0, len(text))
+	for _, char := range strings.ToLower(text) {
+		if unicode.IsLetter(char) || unicode.IsDigit(char) {
+			result = append(result, char)
 		}
 	}
-	return []rune(builder.String())
+	return result
+}
+
+func normalizedLyricLines(lines []Line) [][]rune {
+	result := make([][]rune, 0, len(lines))
+	for _, line := range lines {
+		if normalized := normalizedLyricLine(line.Text); len(normalized) > 0 {
+			result = append(result, normalized)
+		}
+	}
+	return result
+}
+
+func normalizedLyricText(lines []Line) []rune {
+	normalizedLines := normalizedLyricLines(lines)
+	length := 0
+	for _, line := range normalizedLines {
+		length += len(line)
+	}
+	result := make([]rune, 0, length)
+	for _, line := range normalizedLines {
+		result = append(result, line...)
+	}
+	return result
+}
+
+func longestCommonSubsequenceLength(left, right []rune) int {
+	if len(left) < len(right) {
+		left, right = right, left
+	}
+	previous := make([]int, len(right)+1)
+	current := make([]int, len(right)+1)
+	for _, leftRune := range left {
+		for rightIndex, rightRune := range right {
+			if leftRune == rightRune {
+				current[rightIndex+1] = previous[rightIndex] + 1
+				continue
+			}
+			if current[rightIndex] > previous[rightIndex+1] {
+				current[rightIndex+1] = current[rightIndex]
+			} else {
+				current[rightIndex+1] = previous[rightIndex+1]
+			}
+		}
+		previous, current = current, previous
+		clear(current)
+	}
+	return previous[len(right)]
+}
+
+func lyricLineBoundaryPositions(lines []Line) []float64 {
+	normalizedLines := normalizedLyricLines(lines)
+	if len(normalizedLines) < 2 {
+		return nil
+	}
+	total := 0
+	for _, line := range normalizedLines {
+		total += len(line)
+	}
+	if total == 0 {
+		return nil
+	}
+	positions := make([]float64, 0, len(normalizedLines)-1)
+	current := 0
+	for index, line := range normalizedLines {
+		current += len(line)
+		if index+1 < len(normalizedLines) {
+			positions = append(positions, float64(current)/float64(total))
+		}
+	}
+	return positions
+}
+
+func lyricLineBoundaryAgreement(left, right []Line) float64 {
+	leftPositions := lyricLineBoundaryPositions(left)
+	rightPositions := lyricLineBoundaryPositions(right)
+	if len(leftPositions) == 0 || len(rightPositions) == 0 {
+		// There is no boundary information to disagree with when either side is
+		// a single line. Content coverage remains the decisive signal there.
+		return 1
+	}
+	matched := func(source, target []float64) float64 {
+		used := make([]bool, len(target))
+		count := 0
+		for _, position := range source {
+			bestIndex := -1
+			bestDistance := math.Inf(1)
+			for index, candidate := range target {
+				if used[index] {
+					continue
+				}
+				distance := math.Abs(position - candidate)
+				if distance < bestDistance {
+					bestIndex = index
+					bestDistance = distance
+				}
+			}
+			if bestIndex >= 0 && bestDistance <= lyricBoundaryMatchTolerance {
+				used[bestIndex] = true
+				count++
+			}
+		}
+		return float64(count) / float64(len(source))
+	}
+	return (matched(leftPositions, rightPositions) + matched(rightPositions, leftPositions)) / 2
 }
 
 // LyricContentSimilarity returns a normalized similarity score from 0 to 1.
-// It ignores whitespace and punctuation so providers can use different line
-// breaks or timestamp formatting without making otherwise equal lyrics fail.
+// It uses ordered common text, ignoring whitespace and punctuation. This is
+// tolerant of different line breaks and small provider-specific omissions.
 func LyricContentSimilarity(left, right []Line) float64 {
 	leftText := normalizedLyricText(left)
 	rightText := normalizedLyricText(right)
 	if len(leftText) == 0 || len(rightText) == 0 {
 		return 0
 	}
-	if string(leftText) == string(rightText) {
-		return 1
-	}
-	maxLength := len(leftText)
-	if len(rightText) > maxLength {
-		maxLength = len(rightText)
-	}
-	return 1 - float64(levenshtein(leftText, rightText))/float64(maxLength)
+	common := longestCommonSubsequenceLength(leftText, rightText)
+	return 2 * float64(common) / float64(len(leftText)+len(rightText))
 }
 
 func lyricContentMatches(left, right []Line) bool {
-	return LyricContentSimilarity(left, right) >= minLyricContentSimilarity
+	leftText := normalizedLyricText(left)
+	rightText := normalizedLyricText(right)
+	if len(leftText) == 0 || len(rightText) == 0 {
+		return false
+	}
+	common := longestCommonSubsequenceLength(leftText, rightText)
+	similarity := 2 * float64(common) / float64(len(leftText)+len(rightText))
+	shorterLength := len(leftText)
+	longerLength := len(rightText)
+	if shorterLength > longerLength {
+		shorterLength, longerLength = longerLength, shorterLength
+	}
+	shorterCoverage := float64(common) / float64(shorterLength)
+	longerCoverage := float64(common) / float64(longerLength)
+	if similarity < minLyricContentSimilarity || shorterCoverage < minLyricShorterCoverage || longerCoverage < minLyricLongerCoverage {
+		return false
+	}
+	if shorterCoverage >= 0.9 && longerCoverage >= 0.9 {
+		return true
+	}
+	return lyricLineBoundaryAgreement(left, right) >= minLyricLineBoundaryMatch
 }
 
 // ResultFromMap converts an LRCLIB-style JSON object into the common model.
@@ -391,6 +511,12 @@ func isUntrustedEnhancedSource(source string) bool {
 // immediately can cause a brief but visible wrong-lyrics flash.
 func IsDeferredResult(result *Result) bool {
 	return result != nil && isUntrustedEnhancedSource(result.Source)
+}
+
+// IsLRCLIBResult reports whether a result came from LRCLIB and can be used as
+// the ordinary-lyrics backbone for validating enhanced provider results.
+func IsLRCLIBResult(result *Result) bool {
+	return result != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(result.Source)), "lrclib-")
 }
 
 // BetterResult reports whether candidate should replace current.

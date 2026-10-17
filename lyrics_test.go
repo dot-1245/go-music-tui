@@ -2,6 +2,7 @@ package main
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/dot-1245/go-music-tui/internal/lyrics"
@@ -246,5 +247,46 @@ func TestLyricContentSimilarityIgnoresFormatting(t *testing.T) {
 	right := []lyrics.Line{{Text: "Hello world"}, {Text: "続きです"}}
 	if similarity := lyrics.LyricContentSimilarity(left, right); similarity != 1 {
 		t.Fatalf("formatted-equivalent lyrics similarity = %v, want 1", similarity)
+	}
+}
+
+func TestBetterLyricResultAcceptsRewrappedKaraokeWithSmallExtraText(t *testing.T) {
+	ordinary := &lyrics.Result{
+		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
+		Lines: []lyrics.Line{
+			{Time: 1, Text: "Hello, this is the correct lyric."},
+			{Time: 4, Text: "The words continue here."},
+		}, Source: "lrclib-lyricsfile", Quality: 540,
+	}
+	karaoke := &lyrics.Result{
+		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
+		Lines: []lyrics.Line{
+			{Time: 1, Text: "Hello this is the correct lyric", Words: []lyrics.Word{{Time: 1, Text: "Hello this is the correct lyric"}}},
+			{Time: 4, Text: "The words continue here", Words: []lyrics.Word{{Time: 4, Text: "The words continue here"}}},
+			{Time: 6, Text: "yeah", Words: []lyrics.Word{{Time: 6, Text: "yeah"}}},
+		}, Source: "synclrc-enhanced", Quality: 600,
+	}
+	if !lyrics.BetterResult(karaoke, ordinary, 120, "Track", []string{"Artist"}, "Album") {
+		t.Fatal("rewrapped karaoke with a small amount of extra text was rejected")
+	}
+}
+
+func TestBetterLyricResultRejectsKaraokeWithMostlyUnmatchedText(t *testing.T) {
+	ordinary := &lyrics.Result{
+		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
+		Lines: []lyrics.Line{
+			{Time: 1, Text: "Hello, this is the correct lyric."},
+			{Time: 4, Text: "The words continue here."},
+		}, Source: "lrclib-lyricsfile", Quality: 540,
+	}
+	karaoke := &lyrics.Result{
+		Title: "Track", Artist: "Artist", Album: "Album", Duration: 120,
+		Lines: []lyrics.Line{
+			{Time: 1, Text: strings.Repeat("完全に別の歌詞です ", 8), Words: []lyrics.Word{{Time: 1, Text: strings.Repeat("完全に別の歌詞です ", 8)}}},
+			{Time: 4, Text: "Hello, this is the correct lyric.", Words: []lyrics.Word{{Time: 4, Text: "Hello, this is the correct lyric."}}},
+		}, Source: "synclrc-enhanced", Quality: 600,
+	}
+	if lyrics.BetterResult(karaoke, ordinary, 120, "Track", []string{"Artist"}, "Album") {
+		t.Fatal("Karaoke with mostly unmatched text was accepted")
 	}
 }

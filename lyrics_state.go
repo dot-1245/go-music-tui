@@ -175,6 +175,7 @@ func (state *lyricsState) fetch(ctx context.Context, client lyricProvider, title
 
 	var best *lyricResult
 	var baseline *lyricResult
+	var lrclibResult *lyricResult
 	if preserveOnFailure {
 		state.mu.RLock()
 		baseline = cloneLyricResult(state.result)
@@ -203,6 +204,11 @@ func (state *lyricsState) fetch(ctx context.Context, client lyricProvider, title
 					result = nil
 				}
 			}
+			if result != nil && lyrics.IsLRCLIBResult(result) {
+				if lrclibResult == nil || lyrics.BetterResult(result, lrclibResult, durationSec, targetTitle, targetArtists, album) {
+					lrclibResult = result
+				}
+			}
 			comparison := best
 			if comparison == nil {
 				comparison = baseline
@@ -221,6 +227,19 @@ func (state *lyricsState) fetch(ctx context.Context, client lyricProvider, title
 					state.apply(result, requestID, cacheKey, preserveOnFailure)
 				}
 			}
+		}
+	}
+	if best != nil && lyrics.IsDeferredResult(best) {
+		backbone := lrclibResult
+		if backbone == nil && baseline != nil && !lyrics.HasWordSyncedLyrics(baseline.Lines) {
+			backbone = baseline
+		}
+		if backbone == nil {
+			debugf("=> discarded enhanced result without LRCLIB backbone: source=%s title=%q artist=%q (reqID=%d)", best.Source, best.Title, best.Artist, requestID)
+			best = nil
+		} else if !lyrics.BetterResult(best, backbone, durationSec, targetTitle, targetArtists, album) {
+			debugf("=> discarded enhanced result that disagreed with LRCLIB backbone: source=%s title=%q artist=%q (reqID=%d)", best.Source, best.Title, best.Artist, requestID)
+			best = backbone
 		}
 	}
 	if best == nil {
