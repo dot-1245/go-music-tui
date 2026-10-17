@@ -7,7 +7,7 @@ import (
 )
 
 // Snapshot is a player state captured at ReceivedAt. The timestamp is used to
-// advance a playing position locally between playerctl notifications.
+// advance a playing position locally between MPRIS observations.
 type Snapshot struct {
 	Info       Info
 	ReceivedAt time.Time
@@ -73,7 +73,11 @@ func (snapshot Snapshot) PositionAt(now time.Time) float64 {
 	}
 	if strings.EqualFold(strings.TrimSpace(snapshot.Info.Status), "playing") && !snapshot.ReceivedAt.IsZero() {
 		if elapsed := now.Sub(snapshot.ReceivedAt).Seconds(); elapsed > 0 {
-			position += elapsed
+			rate := snapshot.Info.Rate
+			if rate == 0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
+				rate = 1
+			}
+			position += elapsed * rate
 		}
 	}
 	if position < 0 {
@@ -107,5 +111,5 @@ func (snapshot Snapshot) AtTrackEnd(now time.Time) bool {
 // TrackKey identifies changes that require lyric and artwork work.
 func (snapshot Snapshot) TrackKey() string {
 	info := snapshot.Info
-	return strings.Join([]string{info.Name, info.Title, info.Artist, info.Album, info.ArtUrl}, "\x00")
+	return strings.Join([]string{info.Name, info.TrackID, info.Title, info.Artist, info.Album, info.ArtUrl}, "\x00")
 }

@@ -34,10 +34,9 @@ var (
 )
 
 const (
-	frameInterval           = 50 * time.Millisecond
-	playerctlTimeout        = 800 * time.Millisecond
-	positionRefreshInterval = 2 * time.Second
-	lyricsRecheckInterval   = 15 * time.Second
+	frameInterval         = 50 * time.Millisecond
+	playerctlTimeout      = 800 * time.Millisecond
+	lyricsRecheckInterval = 15 * time.Second
 )
 
 var (
@@ -79,13 +78,6 @@ func debugf(format string, args ...interface{}) {
 type controlRequest struct {
 	player string
 	args   []string
-}
-
-type positionRefreshResult struct {
-	expectedTrackKey   string
-	expectedReceivedAt time.Time
-	snapshot           *player.Snapshot
-	err                error
 }
 
 func main() {
@@ -137,13 +129,13 @@ func main() {
 		selectedPlayer = strings.TrimSpace(*flagPlayer)
 	}
 	debugf("initial player selected: %q", selectedPlayer)
-	followContext, cancelFollow := context.WithCancel(ctx)
-	defer func() { cancelFollow() }()
-	playerEvents := playerClient.Follow(followContext, selectedPlayer)
-	restartFollow := func(selector string) {
-		cancelFollow()
-		followContext, cancelFollow = context.WithCancel(ctx)
-		playerEvents = playerClient.Follow(followContext, selector)
+	monitorContext, cancelMonitor := context.WithCancel(ctx)
+	defer func() { cancelMonitor() }()
+	playerEvents := playerClient.WatchMPRIS(monitorContext, selectedPlayer)
+	restartMonitor := func(selector string) {
+		cancelMonitor()
+		monitorContext, cancelMonitor = context.WithCancel(ctx)
+		playerEvents = playerClient.WatchMPRIS(monitorContext, selector)
 	}
 	inputChan := make(chan byte, 32)
 	go readInput(ctx, os.Stdin, inputChan)
@@ -159,10 +151,6 @@ func main() {
 	var renderedArtworkVersion uint64 = ^uint64(0)
 	previousArtCols, previousArtRows := -1, -1
 	previousHasPlayer := false
-	positionRefreshChan := make(chan positionRefreshResult, 1)
-	positionRefreshRunning := false
-	lastPositionRefresh := time.Time{}
-	positionRefreshTrackKey := ""
 	forceClear := true
 	var previousTextRows map[string]string
 
@@ -184,6 +172,7 @@ func main() {
 	}
 
 	acceptSnapshot := func(snapshot player.Snapshot) {
+		debugf("MPRIS snapshot: player=%q status=%q position=%.3f rate=%.3f", snapshot.Info.Name, snapshot.Info.Status, snapshot.Info.PositionSeconds, snapshot.Info.Rate)
 		current = snapshot
 		if !hasPlayer {
 			forceClear = true
@@ -219,13 +208,10 @@ func main() {
 		lyricKey = ""
 		lastLyricsRecheck = time.Time{}
 		artworkSource = ""
-		positionRefreshRunning = false
-		lastPositionRefresh = time.Time{}
-		positionRefreshTrackKey = ""
 		renderedArtworkVersion = ^uint64(0)
 		previousTextRows = nil
 		forceClear = true
-		restartFollow(selectedPlayer)
+		restartMonitor(selectedPlayer)
 	}
 
 	cyclePlayer := func() {
@@ -258,8 +244,8 @@ func main() {
 		forceClear = true
 
 		// Recreate the monitor as well as the rendered state so R can recover
-		// from a stale playerctl stream without restarting the TUI.
-		restartFollow(selectedPlayer)
+		// from a stale MPRIS connection without restarting the TUI.
+		restartMonitor(selectedPlayer)
 		if hasPlayer {
 			acceptSnapshot(current)
 		}
@@ -277,7 +263,7 @@ func main() {
 			}
 			if event.Err != nil {
 				if lastFollowError.IsZero() || time.Since(lastFollowError) >= 2*time.Second {
-					debugf("playerctl follow: %v", event.Err)
+					debugf("MPRIS monitor: %v", event.Err)
 					lastFollowError = time.Now()
 				}
 			}
@@ -296,28 +282,11 @@ func main() {
 				wasUnselected := selectedPlayer == ""
 				acceptSnapshot(*event.Snapshot)
 				if wasUnselected && selectedPlayer != "" {
-					// If no player existed during startup, %any is only a
-					// bootstrap selector. Pin the first usable result so a
+					// If no player existed during startup, discovery is only a
+					// bootstrap step. Pin the first usable result so a
 					// second MPRIS player cannot take over later.
-					restartFollow(selectedPlayer)
+					restartMonitor(selectedPlayer)
 				}
-			}
-
-		case refresh, ok := <-positionRefreshChan:
-			if !ok {
-				positionRefreshChan = nil
-				continue
-			}
-			positionRefreshRunning = false
-			if refresh.err != nil {
-				debugf("playerctl end-of-track refresh: %v", refresh.err)
-			}
-			if refresh.snapshot != nil && hasPlayer && current.TrackKey() == refresh.expectedTrackKey && current.ReceivedAt.Equal(refresh.expectedReceivedAt) {
-				debugf("playerctl position refresh: player=%q position %.2fs -> %.2fs", current.Info.Name, current.PositionAt(time.Now()), refresh.snapshot.PositionAt(time.Now()))
-				acceptSnapshot(*refresh.snapshot)
-				// The old follow process may still have buffered a pre-refresh
-				// record. Replacing it makes the refresh a hard ordering boundary.
-				restartFollow(selectedPlayer)
 			}
 
 		case key, ok := <-inputChan:
@@ -357,40 +326,6 @@ func main() {
 				previousHasPlayer = hasPlayer
 			}
 			now := time.Now()
-			trackKey := current.TrackKey()
-			if trackKey != positionRefreshTrackKey {
-				positionRefreshTrackKey = trackKey
-				lastPositionRefresh = time.Time{}
-			}
-			if hasPlayer && !positionRefreshRunning && current.AtTrackEnd(now) && (lastPositionRefresh.IsZero() || now.Sub(lastPositionRefresh) >= positionRefreshInterval) {
-				positionRefreshRunning = true
-				lastPositionRefresh = now
-				expectedTrackKey := current.TrackKey()
-				expectedReceivedAt := current.ReceivedAt
-				playerName := current.Info.Name
-				if strings.TrimSpace(playerName) == "" {
-					playerName = *flagPlayer
-					if strings.TrimSpace(playerName) == "" {
-						playerName = "%any"
-					}
-				}
-				go func() {
-					info, refreshErr := playerClient.Metadata(ctx, playerName)
-					result := positionRefreshResult{
-						expectedTrackKey:   expectedTrackKey,
-						expectedReceivedAt: expectedReceivedAt,
-						err:                refreshErr,
-					}
-					if refreshErr == nil {
-						snapshot := player.Snapshot{Info: info, ReceivedAt: time.Now()}
-						result.snapshot = &snapshot
-					}
-					select {
-					case positionRefreshChan <- result:
-					case <-ctx.Done():
-					}
-				}()
-			}
 			if hasPlayer && !*flagNoLyrics && !lastLyricsRecheck.IsZero() && now.Sub(lastLyricsRecheck) >= lyricsRecheckInterval && lyricsState.NeedsRefresh() {
 				lastLyricsRecheck = now
 				startLyrics(current.Info, true)

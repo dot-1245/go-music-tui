@@ -1,5 +1,5 @@
-// Package player provides the playerctl boundary used by the TUI and debug
-// commands.
+// Package player provides MPRIS monitoring and the playerctl control and
+// diagnostic boundary used by the TUI and debug commands.
 package player
 
 import (

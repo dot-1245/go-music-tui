@@ -13,6 +13,8 @@ import (
 
 // Info is the MPRIS metadata and playback state consumed by the TUI.
 type Info struct {
+	TrackID                            string
+	Rate                               float64
 	Name, Title, Artist, Album, ArtUrl string
 	Artists                            []string
 	Status, Shuffle, Loop              string
